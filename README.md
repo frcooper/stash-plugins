@@ -12,7 +12,6 @@ Plugins for [Stash](https://github.com/stashapp/stash), published as a plugin so
 2. Fill in:
    - **Name:** `frcooper`
    - **Source URL:** `https://frcooper.github.io/stash-plugins/index.yml`
-   - **Local path:** `frcooper`
 3. Expand the new source, tick the plugins you want, and click **Install**.
 
 Stash shows updates under **Installed Plugins → Check for updates**.
