@@ -1,0 +1,35 @@
+.video-js .vjs-frame-step {
+  cursor: pointer;
+  flex: none;
+}
+
+.video-js .vjs-frame-step svg {
+  fill: currentColor;
+  height: 1.4em;
+  width: 1.4em;
+}
+
+.video-js .vjs-frame-step-counter {
+  align-items: center;
+  display: flex;
+  font-variant-numeric: tabular-nums;
+  margin-right: auto;
+  padding: 0 4px;
+  pointer-events: none;
+  white-space: nowrap;
+}
+
+/* stash pushes the right-hand controls over with margin-right on the duration;
+   the counter sits after the duration, so it takes over that job */
+.video-js .vjs-duration:has(+ .vjs-frame-step-counter) {
+  margin-right: 0;
+}
+
+.video-js.vjs-frame-step-no-buttons .vjs-frame-step,
+.video-js.vjs-frame-step-no-counter .vjs-frame-step-counter {
+  display: none;
+}
+
+.video-js.vjs-frame-step-no-counter .vjs-duration {
+  margin-right: auto;
+}

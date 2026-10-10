@@ -1,0 +1,25 @@
+name: Frame Step
+description: Frame-by-frame stepping in the scene player. Shift+, / Shift+. step one frame back / forward, plus control bar buttons and a frame counter.
+version: 0.1.0
+url: https://github.com/frcooper/stash-plugins/tree/main/plugins/FrameStep
+ui:
+  javascript:
+    - FrameStep.js
+  css:
+    - FrameStep.css
+settings:
+  useBareKeys:
+    displayName: Use , and . without Shift
+    description: Step with plain , and . instead of Shift+, and Shift+. — this overrides Stash's own , (collapse details) and . (toggle scrubber) shortcuts on the scene page.
+    type: BOOLEAN
+  hideButtons:
+    displayName: Hide control bar buttons
+    description: Keyboard shortcuts only.
+    type: BOOLEAN
+  hideCounter:
+    displayName: Hide frame counter
+    type: BOOLEAN
+  fpsOverride:
+    displayName: Frame rate override
+    description: Leave at 0 to use the frame rate Stash detected for the scene's file.
+    type: NUMBER
