@@ -1,6 +1,6 @@
 name: Frame Step
 description: Frame-by-frame stepping in the scene player. Shift+, / Shift+. step one frame back / forward, plus control bar buttons and a frame counter.
-version: 0.1.0
+version: 0.2.0
 url: https://github.com/frcooper/stash-plugins/tree/main/plugins/FrameStep
 ui:
   javascript:

@@ -178,7 +178,10 @@
       const forward = makeButton(player, 1);
       const play = bar.querySelector(".vjs-play-control");
       if (play) {
-        play.after(back, forward);
+        // stash's skip-to-previous button sits before play, so this gives
+        // [previous video] [previous frame] [play] [next frame] [next video]
+        play.before(back);
+        play.after(forward);
       } else {
         bar.prepend(back, forward);
       }
