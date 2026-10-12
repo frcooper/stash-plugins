@@ -5,8 +5,14 @@
 
 .video-js .vjs-frame-step svg {
   fill: currentColor;
-  height: 1.4em;
-  width: 1.4em;
+  height: 1.05em;
+  width: 1.05em;
+}
+
+/* stepping is only useful on a paused frame; hide without collapsing so the
+   play button doesn't shift when playback starts */
+.video-js:not(.vjs-paused) .vjs-frame-step {
+  visibility: hidden;
 }
 
 .video-js .vjs-frame-step-counter {

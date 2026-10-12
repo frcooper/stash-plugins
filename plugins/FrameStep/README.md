@@ -3,7 +3,7 @@
 A Stash UI plugin that adds frame-by-frame stepping to the scene player.
 
 - **Shift+,** / **Shift+.** step one frame back / forward (hold to keep stepping). Stepping pauses playback.
-- Previous / next frame buttons next to play/pause in the control bar.
+- Previous / next frame buttons on either side of play/pause in the control bar, shown while the video is paused.
 - A frame counter (`F 1234`) after the duration; hover it to see the frame rate in use.
 
 ## Install
