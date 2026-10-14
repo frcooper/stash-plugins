@@ -5,8 +5,8 @@ As the Reencode plugin, Stash runs it with the raw interface. args["mode"]:
   encode    job: encode the scene's primary file next to it, then queue a scan
             of the new file and a finalize job (the job queue is serial, so
             finalize runs after the scan)
-  finalize  job: move the new file onto the scene as its primary file, split
-            the original off into its own scene tagged {ORIGINAL}
+  finalize  job: move the new file onto the scene as its primary file, then
+            delete the original, or move it to the backup folder
   status    operation: report how the last run for a scene ended
 
 From the command line, on any Windows, Linux or macOS machine that can reach
@@ -38,7 +38,6 @@ import urllib.error
 import urllib.request
 
 PLUGIN_ID = "Reencode"
-DEFAULT_TAG = "{ORIGINAL}"
 STATE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state")
 
 # Encoders tried in order when no video encoder is configured.
@@ -251,23 +250,6 @@ class Stash:
             if t["name"].lower() == name.lower():
                 return t["id"]
         return None
-
-    def ensure_tag(self, name):
-        tag_id = self.find_tag(name)
-        if tag_id:
-            return tag_id
-        data = self.call(
-            "mutation ($input: TagCreateInput!) { tagCreate(input: $input) { id } }",
-            {
-                "input": {
-                    "name": name,
-                    "description": "Original files replaced by the Reencode plugin.",
-                    "ignore_auto_tag": True,
-                }
-            },
-        )
-        log("i", "Created tag %s" % name)
-        return data["tagCreate"]["id"]
 
     def remove_tag(self, scene_id, tag_id):
         self.call(
@@ -673,21 +655,44 @@ def run_ffmpeg(cmd, duration):
 # --- encoding ----------------------------------------------------------------------
 
 
-def tag_name(settings):
-    return (settings.get("tagName") or "").strip() or DEFAULT_TAG
-
-
-def check_scene(scene, settings):
+def check_scene(scene):
     """Returns the scene's primary file, or raises if it can't be re-encoded."""
     if not scene["files"]:
         raise PluginError("scene %s has no files" % scene["id"])
-    tag = tag_name(settings).lower()
-    if any(t["name"].lower() == tag for t in scene["tags"]):
-        raise PluginError(
-            "scene %s is an original (tagged %s); re-encode the scene it came from"
-            % (scene["id"], tag_name(settings))
-        )
     return scene["files"][0]
+
+
+def backup_dir(settings, paths, create=True):
+    """The local folder originals are moved to, or None to delete them.
+    Checked before encoding, so a bad setting doesn't waste an encode."""
+    if not settings.get("backupOriginals"):
+        return None
+    local = settings.get("backupDirLocal")  # --backup-dir, already local
+    if not local:
+        folder = (settings.get("backupFolder") or "").strip()
+        if not folder:
+            raise PluginError("backing up originals is on, but no backup folder is set")
+        local = paths.to_local(folder)
+    local = os.path.abspath(local)
+    if create:
+        try:
+            os.makedirs(local, exist_ok=True)
+        except OSError as e:
+            raise PluginError("can't create the backup folder %s: %s" % (local, e))
+    elif not os.path.isdir(local):
+        log("i", "The backup folder %s doesn't exist yet; it will be created" % local)
+    return local
+
+
+def free_path(path):
+    if not os.path.exists(path):
+        return path
+    stem, ext = os.path.splitext(path)
+    for n in range(2, 1000):
+        candidate = "%s (%d)%s" % (stem, n, ext)
+        if not os.path.exists(candidate):
+            return candidate
+    raise PluginError("no free file name for %s" % path)
 
 
 def pick_names(src, ext):
@@ -817,9 +822,10 @@ def scan(stash, path):
     )["metadataScan"]
 
 
-def swap(stash, scene_id, new_path, original_file_id, settings):
-    """Makes the scanned new file the scene's primary file and splits the
-    original off. Returns the id of the original's new scene, if any."""
+def swap(stash, scene_id, new_path, original_file_id, original_name, settings, paths, backup):
+    """Makes the scanned new file the scene's primary file, then deletes the
+    original or moves it to the backup folder. Returns where the original
+    went, or None if it was deleted."""
     found = stash.scenes_with_file(new_path)
     if not found:
         raise PluginError(
@@ -843,28 +849,32 @@ def swap(stash, scene_id, new_path, original_file_id, settings):
     )
     log("i", "Scene %s now uses %s" % (scene_id, new_path))
 
-    archive_id = None
-    if not settings.get("keepOriginalAttached"):
-        original = next((f for f in scene["files"] if str(f["id"]) == str(original_file_id)), None)
-        if original:
-            tag_id = stash.ensure_tag(tag_name(settings))
-            data = stash.call(
-                "mutation ($input: SceneCreateInput!) { sceneCreate(input: $input) { id } }",
-                {
-                    "input": {
-                        "title": scene["title"] or os.path.splitext(original["basename"])[0],
-                        "details": "Original file of scene %s, replaced by a re-encode on %s."
-                        % (scene_id, datetime.date.today().isoformat()),
-                        "organized": True,
-                        "tag_ids": [tag_id],
-                        "file_ids": [str(original_file_id)],
-                    }
-                },
+    # only let go of the original once Stash confirms the scene plays the new file
+    scene = stash.scene(scene_id)
+    if not same_stash_path(scene["files"][0]["path"], new_path):
+        raise PluginError("scene %s didn't switch to the new file; the original was left alone" % scene_id)
+    original = next((f for f in scene["files"] if str(f["id"]) == str(original_file_id)), None)
+    went_to = None
+    if not original:
+        log("w", "original file %s is no longer on scene %s; leaving it alone" % (original_file_id, scene_id))
+    elif backup is None:
+        # Stash deletes it from disk, or moves it to its trash folder if one is set
+        stash.call("mutation ($ids: [ID!]!) { deleteFiles(ids: $ids) }", {"ids": [str(original_file_id)]})
+        log("i", "Deleted the original %s" % original["path"])
+    else:
+        # by its name before any rename to make room for the new file
+        name = original_name or stash_pathmod(original["path"]).basename(original["path"])
+        went_to = free_path(os.path.join(backup, name))
+        try:
+            shutil.move(paths.to_local(original["path"]), went_to)
+        except OSError as e:
+            raise PluginError(
+                "couldn't move the original to the backup folder (%s); it is still on the scene "
+                "as a second file, %s" % (e, original["path"])
             )
-            archive_id = data["sceneCreate"]["id"]
-            log("i", "Moved the original to scene %s, tagged %s" % (archive_id, tag_name(settings)))
-        else:
-            log("w", "original file %s is no longer on scene %s; leaving it alone" % (original_file_id, scene_id))
+        # drop Stash's record of the old location without touching the moved file
+        stash.call("mutation ($ids: [ID!]!) { destroyFiles(ids: $ids) }", {"ids": [str(original_file_id)]})
+        log("i", "Moved the original to %s" % went_to)
 
     if not settings.get("skipGenerate"):
         stash.call(
@@ -880,7 +890,7 @@ def swap(stash, scene_id, new_path, original_file_id, settings):
                 }
             },
         )
-    return archive_id
+    return went_to
 
 
 # --- plugin modes --------------------------------------------------------------------
@@ -891,7 +901,8 @@ def plugin_encode(stash, conn, args):
     if not scene_id:
         raise PluginError("run this from the Reencode button on a scene's edit panel")
     settings = stash.settings()
-    original = check_scene(stash.scene(scene_id), settings)
+    original = check_scene(stash.scene(scene_id))
+    backup_dir(settings, PathMap())  # fail now, not after the encode
 
     cfg_ffmpeg, cfg_ffprobe = stash.ffmpeg_config()
     ffmpeg = find_tool("ffmpeg", (settings.get("ffmpegPath") or "").strip() or cfg_ffmpeg, conn.get("Dir") or "")
@@ -909,6 +920,7 @@ def plugin_encode(stash, conn, args):
             "scene_id": scene_id,
             "new_path": target,
             "original_file_id": original["id"],
+            "original_name": original["basename"],
             "scan_job_id": scan_job,
         },
     )
@@ -922,9 +934,13 @@ def plugin_finalize(stash, args):
     # the queue is serial, so the scan has normally finished already
     if args.get("scan_job_id"):
         stash.wait_for_job(args["scan_job_id"], timeout=3600, what="scan")
-    archive_id = swap(stash, scene_id, args["new_path"], args["original_file_id"], settings)
-    write_state(scene_id, "done", file=args["new_path"], original_scene=archive_id)
-    return {"scene_id": scene_id, "original_scene_id": archive_id}
+    paths = PathMap()
+    went_to = swap(
+        stash, scene_id, args["new_path"], args["original_file_id"],
+        args.get("original_name") or "", settings, paths, backup_dir(settings, paths),
+    )
+    write_state(scene_id, "done", file=args["new_path"], backup=went_to)
+    return {"scene_id": scene_id, "backup": went_to}
 
 
 def plugin_main():
@@ -987,7 +1003,6 @@ CLI_SETTINGS = [
     ("--input-args", "inputArgs", "options placed before -i, e.g. --input-args=\"-hwaccel cuda\""),
     ("--extra-args", "extraArgs", "options added after the codec options"),
     ("--output-args", "outputArgs", "replace all generated output options with these"),
-    ("--original-tag", "tagName", "tag for scenes holding an original (default {ORIGINAL})"),
 ]
 
 
@@ -1017,7 +1032,13 @@ def cli_parser():
     p.add_argument("--ffmpeg", help="ffmpeg to use (default: ffmpeg on the PATH)")
     p.add_argument("--limit", type=int, metavar="N", help="stop after N scenes")
     p.add_argument("--dry-run", action="store_true", help="list what would be done and check the files can be found")
-    p.add_argument("--keep-original-attached", action="store_true", help="leave the original on the scene instead of splitting it off")
+    p.add_argument(
+        "--backup",
+        action="store_true",
+        help="move originals to the backup folder instead of deleting them (the folder comes from "
+             "--backup-dir or the plugin's settings)",
+    )
+    p.add_argument("--backup-dir", metavar="DIR", help="back up originals to this folder on this machine (implies --backup)")
     p.add_argument("--no-generate", action="store_true", help="don't queue preview/sprite/phash generation in Stash")
     p.add_argument("--insecure", action="store_true", help="don't verify Stash's HTTPS certificate")
     p.add_argument("-v", "--verbose", action="store_true", help="also show debug messages, such as the ffmpeg command")
@@ -1064,10 +1085,18 @@ def run_cli(opts):
         value = getattr(opts, flag[2:].replace("-", "_"))
         if value is not None:
             settings[key] = value
-    if opts.keep_original_attached:
-        settings["keepOriginalAttached"] = True
+    if opts.backup or opts.backup_dir:
+        settings["backupOriginals"] = True
+    if opts.backup_dir:
+        settings["backupDirLocal"] = opts.backup_dir
     if opts.no_generate:
         settings["skipGenerate"] = True
+
+    backup = backup_dir(settings, paths, create=not opts.dry_run)
+    if backup:
+        log("i", "Originals will be moved to %s" % backup)
+    else:
+        log("i", "Originals will be deleted once the new file is in place (use --backup to keep them)")
 
     tag_id = stash.find_tag(opts.tag)
     if not tag_id:
@@ -1080,7 +1109,7 @@ def run_cli(opts):
         return 0
 
     if opts.dry_run:
-        return dry_run(scenes, settings, paths)
+        return dry_run(scenes, settings, paths, backup)
 
     ffmpeg = find_tool("ffmpeg", opts.ffmpeg)
     if not ffmpeg:
@@ -1099,7 +1128,7 @@ def run_cli(opts):
         log("i", "[%d/%d] scene %s: %s" % (
             i, len(scenes), scene["id"], scene["title"] or (scene["files"][0]["basename"] if scene["files"] else "")))
         try:
-            stop = cli_scene(stash, scene, tag_id, settings, tools, paths)
+            stop = cli_scene(stash, scene, tag_id, settings, tools, paths, backup)
             done += 1
         except PluginError as e:
             log("e", e)
@@ -1113,24 +1142,24 @@ def run_cli(opts):
     return 1 if failed else 0
 
 
-def cli_scene(stash, scene, trigger_tag_id, settings, tools, paths):
+def cli_scene(stash, scene, trigger_tag_id, settings, tools, paths, backup):
     """Re-encodes one scene. Returns True if the user asked to stop."""
-    original = check_scene(scene, settings)
+    original = check_scene(scene)
     new_path = encode_file(stash, original, settings, tools, paths)
     with DeferInterrupt() as deferred:
         log("i", "Scanning %s in Stash" % new_path)
         stash.wait_for_job(scan(stash, new_path), what="scan")
-        swap(stash, scene["id"], new_path, original["id"], settings)
+        swap(stash, scene["id"], new_path, original["id"], original["basename"], settings, paths, backup)
         stash.remove_tag(scene["id"], trigger_tag_id)
     return deferred.hit
 
 
-def dry_run(scenes, settings, paths):
+def dry_run(scenes, settings, paths, backup):
     ext = container(settings)
     missing = 0
     for scene in scenes:
         try:
-            original = check_scene(scene, settings)
+            original = check_scene(scene)
             local = paths.to_local(original["path"])
         except PluginError as e:
             log("e", "scene %s: %s" % (scene["id"], e))
@@ -1140,10 +1169,12 @@ def dry_run(scenes, settings, paths):
             log("e", "scene %s: %s not found on this machine" % (scene["id"], local))
             missing += 1
             continue
-        target, rename = pick_names(local, ext)
+        target, _ = pick_names(local, ext)
         log("i", "scene %s: %s (%s, %s)" % (
             scene["id"], local, original.get("video_codec") or "?", human_size(original.get("size") or 0)))
-        log("i", "    -> %s%s" % (target, "  (original renamed to %s)" % rename if rename else ""))
+        log("i", "    new file: %s" % target)
+        log("i", "    original: %s" % (
+            "moved to " + os.path.join(backup, original["basename"]) if backup else "deleted"))
     if missing:
         log("e", "%d scene(s) can't be re-encoded from here" % missing)
     return 1 if missing else 0
