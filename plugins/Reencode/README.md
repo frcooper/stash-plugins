@@ -4,7 +4,7 @@ A Stash plugin that re-encodes a scene's file with ffmpeg and swaps the new file
 
 - An orange **Reencode** button on the scene's **Edit** tab, between Delete and the scrape buttons. While a re-encode runs, it shows the percentage done. Hover it afterwards to see how the last run ended.
 - The new file is written next to the original and becomes the scene's file. Everything else stays on the scene as it is: title, performers, tags, markers, play and O history, groups, galleries, stash IDs, cover.
-- The original file moves to its own scene tagged `{ORIGINAL}`. Scenes with that tag are hidden from every scene list, and only show up when you filter by the tag (e.g. open the tag's page).
+- Once the new file is in place, the original file is deleted. To keep originals, turn on **Back up originals** and set a backup folder: each original is then moved there instead, and Stash forgets it.
 
 By default the new file is AV1 (SVT-AV1, CRF 30, 10-bit) in MP4. If the audio is AAC, MP3 or Opus it is copied; otherwise it is encoded to AAC. If your ffmpeg has no SVT-AV1, it uses x265 (HEVC) instead. Both play directly in current browsers, but HEVC needs hardware support.
 
@@ -24,11 +24,15 @@ Add this repository as a plugin source (see the [repository README](../../README
    - Different container (e.g. `.mkv` → `.mp4`): the new file is `<name>.mp4`.
    - Same container: the original is renamed to `<name>.original.mp4` through Stash, and the new file takes the original name. That way funscripts and captions that match by name keep working.
 3. **Scan job:** Stash scans the new file.
-4. **Finalize job:** the scene the scan made for the new file is merged into your scene, which moves the file over and deletes that scene. Your scene's metadata is kept, and the new file is made its primary file. The original file goes into a new scene titled like the original, marked organized, and tagged `{ORIGINAL}`. Sprites, previews, marker previews and the phash are then generated for the scene's new file.
+4. **Finalize job:** the scene the scan made for the new file is merged into your scene, which moves the file over and deletes that scene. Your scene's metadata is kept, and the new file is made its primary file. The plugin then checks that Stash shows the scene using the new file. Only after that does it deal with the original:
+   - By default, Stash deletes it. If you've set a trash folder in Stash's settings, Stash moves it there instead.
+   - With **Back up originals** on, the plugin moves it to the backup folder under its original name, adding ` (2)` and so on if that name is taken. Stash's record of the file is then removed, leaving the file on disk.
+
+   Sprites, previews, marker previews and the phash are then generated for the scene's new file.
 
 The jobs show in Stash's job queue and can be cancelled there. Cancelling the encode also stops ffmpeg on Linux and Windows. The `.part` file is left behind; the next re-encode of that scene overwrites it.
 
-Nothing is deleted. To get rid of originals, filter scenes by `{ORIGINAL}` and delete them with **Delete file** ticked.
+If anything fails before the swap is confirmed, the original isn't touched.
 
 ## Settings
 
@@ -43,14 +47,13 @@ Nothing is deleted. To get rid of originals, filter scenes by `{ORIGINAL}` and d
 | Extra output options | Added after the codec options, e.g. `-vf scale=-2:1080`. |
 | Replace all output options | Your own output arguments in place of the generated stream mapping and codec options. The plugin still adds the output format, progress reporting and file name. |
 | ffmpeg path | Blank: the ffmpeg Stash is configured with, then `ffmpeg` on the PATH, then the copy in Stash's config folder. |
-| Original tag | Blank: `{ORIGINAL}`. Created on first use, with auto-tagging turned off. |
-| Don't tag the original | Leave the original on the scene as a secondary file instead of splitting it off. |
-| Show originals in scene lists | Turn off the hiding. |
+| Back up originals | Move each original to the backup folder instead of deleting it. |
+| Backup folder | Where originals go when backing up, as a path on the Stash machine. It's created if needed. If it's inside a library folder, Stash picks the originals up again on its next scan. |
 | Don't generate for the new file | Skip queueing sprite, preview, marker and phash generation after the swap. |
 
 Options are split like a shell command line, so quote values with spaces.
 
-The button and the hiding read the settings when the page loads, so reload the page after changing them. The encode reads them when the job starts.
+The button reads the settings when you click it. The encode reads them when the job starts.
 
 ## Encoding on another machine
 
@@ -76,20 +79,16 @@ If Stash has a password, pass an API key from **Settings → Security** with `--
 
 Each scene that finishes has the tag removed, so a stopped run can be started again and picks up where it left off. Ctrl+C during an encode stops it and deletes the partial file. Ctrl+C while Stash is swapping the file in finishes that scene first, then stops.
 
-The plugin doesn't need to be installed in Stash for the script to work. Without it:
+Originals are deleted unless you back them up:
 
-- The script uses the default settings, or the options below.
-- Scenes tagged `{ORIGINAL}` aren't hidden from Stash's lists, because the hiding is done by the plugin in the browser. The script warns about this. Pass `--keep-original-attached` to keep each original on its scene as a second file instead of creating separate scenes.
+- `--backup-dir DIR` moves each original to `DIR`, a folder on the machine running the script.
+- `--backup` on its own uses the backup folder from the plugin's settings. That path is as Stash sees it, so it needs to be covered by a `--map`.
 
-When the plugin is installed, the script uses its settings, so the button and the script produce the same files. These options override the settings: `--video-codec`, `--video-args`, `--audio-codec`, `--audio-args`, `--container`, `--input-args`, `--extra-args`, `--output-args`, `--original-tag`, `--keep-original-attached`, `--no-generate`. Values that start with `-` need the `=` form, e.g. `--video-args="-crf 28 -preset 4"`. Other options: `--ffmpeg PATH`, `--limit N`, `--insecure` (self-signed HTTPS), `-v` (show the ffmpeg command). Run `python reencode.py --help` for the full list.
+The dry run shows what will happen to each original.
+
+The plugin doesn't need to be installed in Stash. Without it, the script uses the defaults and its options. With it, the script uses the plugin's settings, so the button and the script produce the same files. These options override the settings: `--video-codec`, `--video-args`, `--audio-codec`, `--audio-args`, `--container`, `--input-args`, `--extra-args`, `--output-args`, `--backup`, `--backup-dir`, `--no-generate`. Values that start with `-` need the `=` form, e.g. `--video-args="-crf 28 -preset 4"`. Other options: `--ffmpeg PATH`, `--limit N`, `--insecure` (self-signed HTTPS), `-v` (show the ffmpeg command). Run `python reencode.py --help` for the full list.
 
 Stash still generates previews, sprites and the phash for each new file unless you pass `--no-generate`. That runs on the Stash host.
-
-## How the hiding works
-
-The UI adds an Apollo link in front of Stash's GraphQL client. Every query with a `$scene_filter` variable gets `tags excludes {ORIGINAL}` added to it, unless the filter already mentions the tag (included or excluded). This covers the scenes page, the scene tabs on performers, studios, tags and groups, the play queue and scene pickers. Queries for specific scene IDs are left alone.
-
-The hiding happens only in the browser. Scene counts, the API and other clients still see the originals.
 
 ## Limitations
 
@@ -97,3 +96,4 @@ The hiding happens only in the browser. Scene counts, the API and other clients 
 - With the button, the encode runs in Stash's job queue, so other jobs wait until it finishes. The command-line script doesn't have this problem.
 - Cancelling on macOS leaves ffmpeg running until it finishes.
 - The new file needs as much free space as it takes up, in the original's folder.
+- Sprites and previews generated for the original may be left in Stash's generated folder. Stash's **Clean Generated Files** task clears any leftovers.

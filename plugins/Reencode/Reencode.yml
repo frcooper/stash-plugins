@@ -1,6 +1,6 @@
 name: Reencode
-description: Adds a Reencode button to the scene edit panel. It re-encodes the scene's file with ffmpeg, swaps the new file in as the scene's file, and moves the original to a hidden scene tagged {ORIGINAL}.
-version: 0.2.1
+description: Adds a Reencode button to the scene edit panel. It re-encodes the scene's file with ffmpeg and swaps the new file in as the scene's file, then deletes the original or moves it to a backup folder.
+version: 0.3.0
 url: https://github.com/frcooper/stash-plugins/tree/main/plugins/Reencode
 exec:
   - python
@@ -48,18 +48,14 @@ settings:
     displayName: ffmpeg path
     description: Blank uses the ffmpeg Stash is configured with.
     type: STRING
-  tagName:
-    displayName: Original tag
-    description: Tag for scenes holding an original file. Blank uses {ORIGINAL}.
+  backupOriginals:
+    displayName: Back up originals
+    description: Move the original file to the backup folder instead of deleting it.
+    type: BOOLEAN
+  backupFolder:
+    displayName: Backup folder
+    description: Where originals go when backing up, as a path on the Stash machine. Created if needed.
     type: STRING
-  keepOriginalAttached:
-    displayName: Don't tag the original
-    description: Leave the original file on the scene as a secondary file instead of moving it to its own tagged scene.
-    type: BOOLEAN
-  showOriginals:
-    displayName: Show originals in scene lists
-    description: By default, scenes with the original tag are hidden from every scene list unless the list is filtered by that tag.
-    type: BOOLEAN
   skipGenerate:
     displayName: Don't generate for the new file
     description: Skip queueing sprite, preview, marker and phash generation for the scene after the swap.

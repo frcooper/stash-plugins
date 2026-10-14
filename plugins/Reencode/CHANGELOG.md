@@ -1,11 +1,13 @@
 # Changelog
 
-## 0.2.1
+## 0.3.0
 
+- **Originals are now deleted by default** once the new file is in place and Stash confirms the scene uses it. Deletion goes through Stash, so Stash's trash folder is used if you've set one.
+- New settings **Back up originals** and **Backup folder**: when on, originals are moved to the backup folder under their own name and Stash forgets them. The command-line equivalents are `--backup` and `--backup-dir`.
+- Removed the `{ORIGINAL}` tag, the separate scenes for originals, and the hiding of those scenes, along with the **Original tag**, **Don't tag the original** and **Show originals in scene lists** settings. Scenes already tagged `{ORIGINAL}` by earlier versions now show in scene lists again. Filter by the tag to delete or keep them.
 - The button now only shows "Reencode", or the percentage done while a re-encode runs. How the last run ended is in its tooltip.
 - The button stays the same width in both states, and is never wider than the "Scrape with…" button.
 - The button copies its font from the Save and Delete buttons, and uses Stash's own warning (orange) button style.
-- The command-line script warns when the plugin isn't enabled in the target Stash: without it, scenes tagged {ORIGINAL} aren't hidden from Stash's lists.
 
 ## 0.2.0
 
