@@ -5,6 +5,7 @@ Plugins for [Stash](https://github.com/stashapp/stash), published as a plugin so
 | Plugin | Description |
 |---|---|
 | [Frame Step](plugins/FrameStep) | Frame-by-frame stepping in the scene player. |
+| [Reencode](plugins/Reencode) | Re-encode a scene's file with ffmpeg and swap it in, keeping the original hidden under an `{ORIGINAL}` tag. |
 
 ## Install
 
