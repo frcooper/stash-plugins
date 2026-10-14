@@ -24,7 +24,7 @@ Add this repository as a plugin source (see the [repository README](../../README
    - Different container (e.g. `.mkv` → `.mp4`): the new file is `<name>.mp4`.
    - Same container: the original is renamed to `<name>.original.mp4` through Stash, and the new file takes the original name. That way funscripts and captions that match by name keep working.
 3. **Scan job:** Stash scans the new file.
-4. **Finalize job:** the new file is moved onto the scene and made its primary file. The scene the scan made for it is deleted. The original file goes into a new scene titled like the original, marked organized, and tagged `{ORIGINAL}`. Sprites, previews, marker previews and the phash are then generated for the scene's new file.
+4. **Finalize job:** the scene the scan made for the new file is merged into your scene, which moves the file over and deletes that scene. Your scene's metadata is kept, and the new file is made its primary file. The original file goes into a new scene titled like the original, marked organized, and tagged `{ORIGINAL}`. Sprites, previews, marker previews and the phash are then generated for the scene's new file.
 
 The jobs show in Stash's job queue and can be cancelled there. Cancelling the encode also stops ffmpeg on Linux and Windows. The `.part` file is left behind; the next re-encode of that scene overwrites it.
 
@@ -52,6 +52,34 @@ Options are split like a shell command line, so quote values with spaces.
 
 The button and the hiding read the settings when the page loads, so reload the page after changing them. The encode reads them when the job starts.
 
+## Encoding on another machine
+
+If the Stash host is too slow to encode, run `reencode.py` from the command line on a faster Windows, Linux or macOS machine. It re-encodes every scene with a tag you choose, one at a time, and does the same swap as the button. Stash only has to scan the new file.
+
+The script is in the installed plugin's folder, or download it from [this repository](https://raw.githubusercontent.com/frcooper/stash-plugins/main/plugins/Reencode/reencode.py). It needs Python 3.8+ and ffmpeg (with ffprobe) on that machine. No other packages are required.
+
+1. Tag the scenes to re-encode, e.g. with `{REENCODE}`.
+2. Make Stash's library folders reachable from the fast machine through a share (SMB/NFS). The new file is written next to the original through the share.
+3. Run it with `--map` for each library folder: the path as Stash sees it, `=`, the path on this machine. Check with `--dry-run` first:
+
+```bash
+python reencode.py --stash http://nas:9999 --tag "{REENCODE}" --map /data=//nas/media --dry-run
+```
+
+```bash
+python reencode.py --stash http://nas:9999 --tag "{REENCODE}" --map /data=/mnt/media
+```
+
+Either side of `--map` can be a Windows or Linux path, e.g. `--map /data=Z:\` when running on Windows against a Docker Stash, or `--map "D:\Videos=/mnt/videos"` the other way round.
+
+If Stash has a password, pass an API key from **Settings → Security** with `--api-key`, or set it in the `STASH_API_KEY` environment variable to keep it out of your shell history.
+
+Each scene that finishes has the tag removed, so a stopped run can be started again and picks up where it left off. Ctrl+C during an encode stops it and deletes the partial file. Ctrl+C while Stash is swapping the file in finishes that scene first, then stops.
+
+Encoder settings come from the plugin's settings in Stash, so the button and the script produce the same files. The plugin doesn't need to be installed, though. These options override the settings: `--video-codec`, `--video-args`, `--audio-codec`, `--audio-args`, `--container`, `--input-args`, `--extra-args`, `--output-args`, `--original-tag`, `--keep-original-attached`, `--no-generate`. Values that start with `-` need the `=` form, e.g. `--video-args="-crf 28 -preset 4"`. Other options: `--ffmpeg PATH`, `--limit N`, `--insecure` (self-signed HTTPS), `-v` (show the ffmpeg command). Run `python reencode.py --help` for the full list.
+
+Stash still generates previews, sprites and the phash for each new file unless you pass `--no-generate`. That runs on the Stash host.
+
 ## How the hiding works
 
 The UI adds an Apollo link in front of Stash's GraphQL client. Every query with a `$scene_filter` variable gets `tags excludes {ORIGINAL}` added to it, unless the filter already mentions the tag (included or excluded). This covers the scenes page, the scene tabs on performers, studios, tags and groups, the play queue and scene pickers. Queries for specific scene IDs are left alone.
@@ -61,6 +89,6 @@ The hiding happens only in the browser. Scene counts, the API and other clients 
 ## Limitations
 
 - The first file on the scene is re-encoded. Other files on the scene stay as they are.
-- The encode runs in Stash's job queue, so other jobs wait until it finishes.
+- With the button, the encode runs in Stash's job queue, so other jobs wait until it finishes. The command-line script doesn't have this problem.
 - Cancelling on macOS leaves ffmpeg running until it finishes.
 - The new file needs as much free space as it takes up, in the original's folder.

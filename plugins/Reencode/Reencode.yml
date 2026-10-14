@@ -1,6 +1,6 @@
 name: Reencode
 description: Adds a Reencode button to the scene edit panel. It re-encodes the scene's file with ffmpeg, swaps the new file in as the scene's file, and moves the original to a hidden scene tagged {ORIGINAL}.
-version: 0.1.0
+version: 0.2.0
 url: https://github.com/frcooper/stash-plugins/tree/main/plugins/Reencode
 exec:
   - python
