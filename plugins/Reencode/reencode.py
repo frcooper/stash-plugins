@@ -1,6 +1,6 @@
-"""Re-encodes a scene's file and swaps the new file in as the scene's file.
+"""Re-encodes Stash scenes' files and swaps the new file in as the scene's file.
 
-Runs as a Stash raw-interface plugin. Modes (args["mode"]):
+As the Reencode plugin, Stash runs it with the raw interface. args["mode"]:
 
   encode    job: encode the scene's primary file next to it, then queue a scan
             of the new file and a finalize job (the job queue is serial, so
@@ -9,20 +9,32 @@ Runs as a Stash raw-interface plugin. Modes (args["mode"]):
             the original off into its own scene tagged {ORIGINAL}
   status    operation: report how the last run for a scene ended
 
-Only the standard library is used, so it runs on any Python 3.8+.
+From the command line, on any Windows, Linux or macOS machine that can reach
+Stash and see its files over a share, it re-encodes every scene with a tag:
+
+  python reencode.py --stash http://nas:9999 --tag "{REENCODE}" --map /data=//nas/media
+
+Run it with --help for the options. Only the standard library is used, so it
+runs on any Python 3.8+.
 """
 
+import argparse
 import collections
 import datetime
 import json
+import ntpath
 import os
+import posixpath
+import re
 import shlex
 import shutil
+import signal
 import ssl
 import subprocess
 import sys
 import threading
 import time
+import urllib.error
 import urllib.request
 
 PLUGIN_ID = "Reencode"
@@ -74,22 +86,57 @@ MUXERS = {
 
 MP4_LIKE = {"mp4", "m4v", "mov"}
 
+SCENE_FIELDS = """
+  id title
+  tags { id name }
+  files { id path basename duration size video_codec audio_codec width height format }
+"""
+
 
 class PluginError(Exception):
     pass
 
 
-# --- logging (Stash's plugin log protocol on stderr) ---------------------------
+# --- logging -------------------------------------------------------------------
+#
+# As a plugin, messages go to stderr in Stash's plugin log protocol. From the
+# command line they are plain text, with a progress line on a terminal.
+
+CLI = False
+VERBOSE = False
+_progress_shown = False
+
+
+def _end_progress_line():
+    global _progress_shown
+    if _progress_shown:
+        sys.stderr.write("\n")
+        _progress_shown = False
 
 
 def log(level, msg):
-    for line in str(msg).splitlines() or [""]:
-        sys.stderr.write("\x01%s\x02%s\n" % (level, line))
+    lines = str(msg).splitlines() or [""]
+    if CLI:
+        if level == "d" and not VERBOSE:
+            return
+        _end_progress_line()
+        prefix = {"w": "warning: ", "e": "error: "}.get(level, "")
+        for line in lines:
+            sys.stderr.write(prefix + line + "\n")
+    else:
+        for line in lines:
+            sys.stderr.write("\x01%s\x02%s\n" % (level, line))
     sys.stderr.flush()
 
 
-def progress(p):
-    sys.stderr.write("\x01p\x02%.4f\n" % max(0.0, min(1.0, p)))
+def progress(p, speed=""):
+    global _progress_shown
+    p = max(0.0, min(1.0, p))
+    if not CLI:
+        sys.stderr.write("\x01p\x02%.4f\n" % p)
+    elif sys.stderr.isatty():
+        sys.stderr.write("\r  %5.1f%%  %-12s" % (p * 100, ("speed " + speed) if speed else ""))
+        _progress_shown = True
     sys.stderr.flush()
 
 
@@ -97,27 +144,44 @@ def progress(p):
 
 
 class Stash:
-    def __init__(self, conn):
+    def __init__(self, url, headers=None, verify=True):
+        self.url = url.rstrip("/")
+        if not self.url.endswith("/graphql"):
+            self.url += "/graphql"
+        self.headers = {"Content-Type": "application/json", "Accept": "application/json"}
+        self.headers.update(headers or {})
+        self.ssl = None
+        if self.url.startswith("https:") and not verify:
+            self.ssl = ssl._create_unverified_context()
+
+    @classmethod
+    def from_plugin(cls, conn):
         scheme = conn.get("Scheme") or "http"
         host = conn.get("Host") or "localhost"
         if host in ("0.0.0.0", "::", "[::]"):
             host = "localhost"
         if ":" in host and not host.startswith("["):
             host = "[%s]" % host
-        self.url = "%s://%s:%s/graphql" % (scheme, host, conn.get("Port") or 9999)
-        self.headers = {"Content-Type": "application/json", "Accept": "application/json"}
+        headers = {}
         cookie = conn.get("SessionCookie") or {}
         if cookie.get("Name"):
-            self.headers["Cookie"] = "%s=%s" % (cookie["Name"], cookie.get("Value", ""))
+            headers["Cookie"] = "%s=%s" % (cookie["Name"], cookie.get("Value", ""))
         # the server is local; its certificate may be self-signed
-        self.ssl = ssl._create_unverified_context() if scheme == "https" else None
-        self.config_dir = conn.get("Dir") or ""
+        url = "%s://%s:%s/graphql" % (scheme, host, conn.get("Port") or 9999)
+        return cls(url, headers, verify=False)
 
     def call(self, query, variables=None):
         body = json.dumps({"query": query, "variables": variables or {}}).encode()
         req = urllib.request.Request(self.url, data=body, headers=self.headers)
-        with urllib.request.urlopen(req, context=self.ssl, timeout=120) as res:
-            data = json.loads(res.read().decode())
+        try:
+            with urllib.request.urlopen(req, context=self.ssl, timeout=120) as res:
+                data = json.loads(res.read().decode())
+        except urllib.error.HTTPError as e:
+            if e.code in (401, 403):
+                raise PluginError("Stash refused the request (HTTP %s); check the API key" % e.code)
+            raise PluginError("Stash returned HTTP %s" % e.code)
+        except urllib.error.URLError as e:
+            raise PluginError("can't reach Stash at %s: %s" % (self.url, e.reason))
         if data.get("errors"):
             raise PluginError("GraphQL: " + "; ".join(e.get("message", "?") for e in data["errors"]))
         return data["data"]
@@ -136,20 +200,23 @@ class Stash:
             return "", ""
 
     def scene(self, scene_id):
-        data = self.call(
-            """query ($id: ID!) {
-              findScene(id: $id) {
-                id title
-                tags { id name }
-                files { id path basename duration size video_codec audio_codec width height format }
-              }
-            }""",
-            {"id": scene_id},
-        )
+        data = self.call("query ($id: ID!) { findScene(id: $id) { %s } }" % SCENE_FIELDS, {"id": scene_id})
         scene = data["findScene"]
         if not scene:
             raise PluginError("scene %s not found" % scene_id)
         return scene
+
+    def scenes_with_tag(self, tag_id):
+        data = self.call(
+            """query ($f: SceneFilterType) {
+              findScenes(scene_filter: $f, filter: {per_page: -1, sort: "id", direction: ASC}) {
+                scenes { %s }
+              }
+            }"""
+            % SCENE_FIELDS,
+            {"f": {"tags": {"value": [tag_id], "modifier": "INCLUDES", "depth": 0}}},
+        )
+        return data["findScenes"]["scenes"]
 
     def scenes_with_file(self, path):
         q = """query ($f: SceneFilterType) {
@@ -158,14 +225,14 @@ class Stash:
         found = []
         for crit in (
             {"value": path, "modifier": "EQUALS"},
-            {"value": os.path.basename(path), "modifier": "INCLUDES"},
+            {"value": stash_pathmod(path).basename(path), "modifier": "INCLUDES"},
         ):
             scenes = self.call(q, {"f": {"path": crit}})["findScenes"]["scenes"]
             found = [
                 (s, f)
                 for s in scenes
                 for f in s["files"]
-                if same_path(f["path"], path)
+                if same_stash_path(f["path"], path)
             ]
             if found:
                 break
@@ -202,10 +269,30 @@ class Stash:
         log("i", "Created tag %s" % name)
         return data["tagCreate"]["id"]
 
+    def remove_tag(self, scene_id, tag_id):
+        self.call(
+            "mutation ($input: BulkSceneUpdateInput!) { bulkSceneUpdate(input: $input) { id } }",
+            {"input": {"ids": [scene_id], "tag_ids": {"ids": [tag_id], "mode": "REMOVE"}}},
+        )
+
     def job_status(self, job_id):
         data = self.call("query ($id: ID!) { findJob(input: {id: $id}) { status } }", {"id": job_id})
         job = data["findJob"]
         return job and job["status"]
+
+    def wait_for_job(self, job_id, timeout=None, what="job"):
+        """Returns when the job has ended, or False on timeout."""
+        start = last_note = time.monotonic()
+        while True:
+            if self.job_status(job_id) in (None, "FINISHED", "CANCELLED", "FAILED"):
+                return True
+            now = time.monotonic()
+            if timeout and now - start > timeout:
+                return False
+            if now - last_note > 60:
+                log("i", "Still waiting for Stash's %s (other jobs may be ahead of it)" % what)
+                last_note = now
+            time.sleep(2)
 
     def run_task(self, description, args):
         data = self.call(
@@ -217,8 +304,79 @@ class Stash:
         return data["runPluginTask"]
 
 
-def same_path(a, b):
-    return os.path.normcase(os.path.normpath(a)) == os.path.normcase(os.path.normpath(b))
+# --- paths -----------------------------------------------------------------------
+#
+# Stash reports paths as its own machine sees them, which may be a different OS
+# from the one running this script. Stash-side paths are handled with ntpath or
+# posixpath by their look, never with os.path.
+
+
+def is_windows_path(p):
+    return bool(re.match(r"^[A-Za-z]:([\\/]|$)", p)) or p.startswith("\\\\")
+
+
+def stash_pathmod(p):
+    return ntpath if is_windows_path(p) else posixpath
+
+
+def _path_key(p, windows):
+    return p.replace("/", "\\").rstrip("\\").lower() if windows else p.rstrip("/")
+
+
+def same_stash_path(a, b):
+    windows = is_windows_path(a) or is_windows_path(b)
+    return _path_key(a, windows) == _path_key(b, windows)
+
+
+def _relative_parts(path, prefix, windows):
+    """The components of path below prefix, or None if it isn't below it."""
+    sep = "\\" if windows else "/"
+    p, pre = _path_key(path, windows), _path_key(prefix, windows)
+    if p == pre:
+        return []
+    if not p.startswith(pre + sep):
+        return None
+    rest = path[len(pre) + 1:]
+    return [part for part in re.split(r"[\\/]" if windows else "/", rest) if part]
+
+
+class PathMap:
+    """Translates between paths as Stash sees them and as this machine sees them."""
+
+    def __init__(self, pairs=()):
+        # longest Stash prefix first, so nested mappings win
+        self.pairs = sorted(pairs, key=lambda p: len(p[0]), reverse=True)
+
+    @classmethod
+    def parse(cls, specs):
+        pairs = []
+        for spec in specs:
+            stash_prefix, sep, local_prefix = spec.partition("=")
+            if not sep or not stash_prefix or not local_prefix:
+                raise PluginError("--map needs STASH_PATH=LOCAL_PATH, got %r" % spec)
+            if re.match(r"^[A-Za-z]:$", local_prefix):
+                local_prefix += "\\"  # "Z:" alone means the drive's current folder
+            pairs.append((stash_prefix, local_prefix))
+        return cls(pairs)
+
+    def to_local(self, stash_path):
+        for stash_prefix, local_prefix in self.pairs:
+            parts = _relative_parts(stash_path, stash_prefix, is_windows_path(stash_prefix))
+            if parts is not None:
+                return os.path.join(local_prefix, *parts) if parts else local_prefix
+        if self.pairs and not os.path.exists(stash_path):
+            raise PluginError("no --map covers %s" % stash_path)
+        return stash_path
+
+    def to_stash(self, local_path):
+        for stash_prefix, local_prefix in self.pairs:
+            parts = _relative_parts(local_path, local_prefix, os.name == "nt")
+            if parts is not None:
+                if not parts:
+                    return stash_prefix
+                sep = "\\" if is_windows_path(stash_prefix) else "/"
+                return stash_prefix.rstrip("\\/") + sep + sep.join(parts)
+        return local_path
 
 
 # --- run state, read back by the UI ---------------------------------------------
@@ -229,7 +387,7 @@ def state_path(scene_id):
 
 
 def write_state(scene_id, state, **extra):
-    if not scene_id:
+    if CLI or not scene_id:
         return
     try:
         os.makedirs(STATE_DIR, exist_ok=True)
@@ -251,7 +409,7 @@ def read_state(scene_id):
 # --- ffmpeg ----------------------------------------------------------------------
 
 
-def find_tool(name, configured, stash_config_dir):
+def find_tool(name, configured, stash_config_dir=""):
     exe = name + (".exe" if os.name == "nt" else "")
     for candidate in (configured, shutil.which(name)):
         if candidate and (os.path.isfile(candidate) or shutil.which(candidate)):
@@ -264,12 +422,26 @@ def find_tool(name, configured, stash_config_dir):
     return None
 
 
+def find_ffprobe(ffmpeg, fallback=""):
+    folder, base = os.path.split(ffmpeg)
+    sibling = os.path.join(folder, base.lower().replace("ffmpeg", "ffprobe"))
+    return find_tool("ffprobe", sibling if folder and os.path.isfile(sibling) else fallback)
+
+
+class Tools:
+    def __init__(self, ffmpeg, ffprobe):
+        self.ffmpeg = ffmpeg
+        self.ffprobe = ffprobe
+        self.encoders = available_encoders(ffmpeg)
+
+
 def available_encoders(ffmpeg):
     out = subprocess.run(
         [ffmpeg, "-hide_banner", "-encoders"],
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
         universal_newlines=True,
+        errors="replace",
     ).stdout
     names = set()
     for line in out.splitlines():
@@ -289,7 +461,8 @@ def probe_audio_codecs(ffprobe, path):
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             universal_newlines=True,
-            timeout=60,
+            errors="replace",
+            timeout=120,
         ).stdout
         return [s.get("codec_name") for s in json.loads(out).get("streams", [])]
     except Exception:
@@ -302,13 +475,32 @@ def probe_duration(ffprobe, path):
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
         universal_newlines=True,
-        timeout=120,
+        errors="replace",
+        timeout=300,
     ).stdout
     return float(json.loads(out)["format"]["duration"])
 
 
 def split_args(s):
     return shlex.split(s) if s and s.strip() else []
+
+
+def video_encoder(settings, encoders):
+    vcodec = (settings.get("videoCodec") or "").strip()
+    if not vcodec:
+        vcodec = next((e for e in DEFAULT_VIDEO_ENCODERS if e in encoders), None)
+        if not vcodec:
+            raise PluginError(
+                "this ffmpeg has none of %s; set a video encoder"
+                % ", ".join(DEFAULT_VIDEO_ENCODERS)
+            )
+    elif vcodec != "copy" and encoders and vcodec not in encoders:
+        raise PluginError("this ffmpeg has no %s encoder" % vcodec)
+    return vcodec
+
+
+def container(settings):
+    return (settings.get("container") or "").strip().lstrip(".").lower() or "mp4"
 
 
 def build_output_args(settings, ext, encoders, audio_codecs):
@@ -323,16 +515,7 @@ def build_output_args(settings, ext, encoders, audio_codecs):
         args += ["-map", "0:s?", "-map", "0:t?", "-c:s", "copy", "-c:t", "copy"]
     args += ["-map_metadata", "0", "-map_chapters", "0"]
 
-    vcodec = (settings.get("videoCodec") or "").strip()
-    if not vcodec:
-        vcodec = next((e for e in DEFAULT_VIDEO_ENCODERS if e in encoders), None)
-        if not vcodec:
-            raise PluginError(
-                "this ffmpeg has none of %s; set a video encoder in the plugin settings"
-                % ", ".join(DEFAULT_VIDEO_ENCODERS)
-            )
-    elif vcodec != "copy" and encoders and vcodec not in encoders:
-        raise PluginError("this ffmpeg has no %s encoder" % vcodec)
+    vcodec = video_encoder(settings, encoders)
     vargs = settings.get("videoArgs") or ""
     if not vargs.strip():
         vargs = VIDEO_DEFAULT_ARGS.get(vcodec, "")
@@ -364,7 +547,6 @@ def kill_with_parent():
     the job is cancelled, which would otherwise leave ffmpeg running."""
     if sys.platform.startswith("linux"):
         import ctypes
-        import signal
 
         libc = ctypes.CDLL(None, use_errno=True)
 
@@ -460,33 +642,52 @@ def run_ffmpeg(cmd, duration):
     reader = threading.Thread(target=read_stderr, daemon=True)
     reader.start()
 
-    last_log = time.monotonic()
-    speed = ""
-    for line in proc.stdout:
-        key, _, value = line.strip().partition("=")
-        if key == "speed":
-            speed = value
-        elif key in ("out_time_us", "out_time_ms") and duration:
-            try:
-                done = int(value) / 1e6 / duration
-            except ValueError:
-                continue
-            progress(done)
-            if time.monotonic() - last_log > 300:
-                log("i", "%.0f%% (speed %s)" % (done * 100, speed or "?"))
-                last_log = time.monotonic()
-
-    proc.wait()
+    try:
+        last_log = time.monotonic()
+        speed = ""
+        for line in proc.stdout:
+            key, _, value = line.strip().partition("=")
+            if key == "speed":
+                speed = value
+            elif key in ("out_time_us", "out_time_ms") and duration:
+                try:
+                    done = int(value) / 1e6 / duration
+                except ValueError:
+                    continue
+                progress(done, speed)
+                if time.monotonic() - last_log > 300:
+                    log("i", "%.0f%% (speed %s)" % (done * 100, speed or "?"))
+                    last_log = time.monotonic()
+        proc.wait()
+    finally:
+        # interrupted: make sure ffmpeg has let go of the output before cleanup
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+        _end_progress_line()
     reader.join(timeout=5)
     if proc.returncode != 0:
         raise PluginError("ffmpeg exited with code %s:\n%s" % (proc.returncode, "\n".join(tail)))
 
 
-# --- modes -----------------------------------------------------------------------
+# --- encoding ----------------------------------------------------------------------
 
 
 def tag_name(settings):
     return (settings.get("tagName") or "").strip() or DEFAULT_TAG
+
+
+def check_scene(scene, settings):
+    """Returns the scene's primary file, or raises if it can't be re-encoded."""
+    if not scene["files"]:
+        raise PluginError("scene %s has no files" % scene["id"])
+    tag = tag_name(settings).lower()
+    if any(t["name"].lower() == tag for t in scene["tags"]):
+        raise PluginError(
+            "scene %s is an original (tagged %s); re-encode the scene it came from"
+            % (scene["id"], tag_name(settings))
+        )
+    return scene["files"][0]
 
 
 def pick_names(src, ext):
@@ -496,7 +697,7 @@ def pick_names(src, ext):
     target = os.path.join(folder, "%s.%s" % (stem, ext))
     if not os.path.exists(target):
         return target, None
-    if same_path(target, src):
+    if os.path.normcase(target) == os.path.normcase(src):
         # same container: the new file takes the original's name and the
         # original is renamed, so sidecar files (funscripts, captions) that
         # match by name follow the new file
@@ -505,63 +706,68 @@ def pick_names(src, ext):
             name = "%s%s.%s" % (stem, suffix, os.path.splitext(src)[1].lstrip("."))
             if not os.path.exists(os.path.join(folder, name)):
                 return target, name
+    return pick_free_suffix(target), None
+
+
+def pick_free_suffix(target):
+    stem, ext = os.path.splitext(target)
     for n in range(1, 100):
-        suffix = ".reencoded" if n == 1 else ".reencoded%d" % n
-        path = os.path.join(folder, "%s%s.%s" % (stem, suffix, ext))
+        path = "%s%s%s" % (stem, ".reencoded" if n == 1 else ".reencoded%d" % n, ext)
         if not os.path.exists(path):
-            return path, None
-    raise PluginError("no free file name next to %s" % src)
+            return path
+    raise PluginError("no free file name for %s" % target)
 
 
-def encode(stash, args):
-    scene_id = str(args.get("scene_id") or "")
-    if not scene_id:
-        raise PluginError("run this from the Reencode button on a scene's edit panel")
-    settings = stash.settings()
-    scene = stash.scene(scene_id)
-    if not scene["files"]:
-        raise PluginError("scene %s has no files" % scene_id)
+def move_into_place(part, target):
+    # A network share can take a moment to show the original's rename. Never
+    # overwrite: on Linux os.rename would replace whatever is at target.
+    for _ in range(20):
+        if not os.path.exists(target):
+            os.rename(part, target)
+            return
+        time.sleep(0.5)
+    raise PluginError("%s still exists; the new file is left at %s" % (target, part))
 
-    tag = tag_name(settings).lower()
-    if any(t["name"].lower() == tag for t in scene["tags"]):
-        raise PluginError("scene %s is an original (tagged %s); re-encode the scene it came from" % (scene_id, tag_name(settings)))
 
-    original = scene["files"][0]
-    src = original["path"]
+def human_size(n):
+    for unit in ("B", "KiB", "MiB", "GiB"):
+        if n < 1024:
+            return "%.1f %s" % (n, unit)
+        n /= 1024.0
+    return "%.1f TiB" % n
+
+
+def encode_file(stash, original, settings, tools, paths):
+    """Encodes the file next to itself and renames it into place. Returns the
+    new file's path as Stash sees it."""
+    src_stash = original["path"]
+    src = paths.to_local(src_stash)
     if not os.path.isfile(src):
-        raise PluginError("can't read %s from the plugin" % src)
+        raise PluginError("can't read %s" % src)
 
-    cfg_ffmpeg, cfg_ffprobe = stash.ffmpeg_config()
-    ffmpeg = find_tool("ffmpeg", (settings.get("ffmpegPath") or "").strip() or cfg_ffmpeg, stash.config_dir)
-    if not ffmpeg:
-        raise PluginError("ffmpeg not found; set its path in the plugin settings")
-    sibling = os.path.join(os.path.dirname(ffmpeg), os.path.basename(ffmpeg).replace("ffmpeg", "ffprobe"))
-    ffprobe = find_tool("ffprobe", sibling if os.path.isfile(sibling) else cfg_ffprobe, stash.config_dir)
-
-    ext = (settings.get("container") or "").strip().lstrip(".").lower() or "mp4"
+    ext = container(settings)
     output_args = build_output_args(
-        settings, ext, available_encoders(ffmpeg), probe_audio_codecs(ffprobe, src)
+        settings, ext, tools.encoders, probe_audio_codecs(tools.ffprobe, src)
     )
 
     target, original_rename = pick_names(src, ext)
     part = target + ".part"  # not a video extension, so a scan meanwhile skips it
 
-    cmd = [ffmpeg, "-hide_banner", "-nostdin", "-y"]
+    cmd = [tools.ffmpeg, "-hide_banner", "-nostdin", "-y"]
     cmd += split_args(settings.get("inputArgs") or "")
     cmd += ["-i", src] + output_args
     cmd += ["-f", MUXERS.get(ext, ext), "-progress", "pipe:1", "-nostats", part]
 
-    write_state(scene_id, "encoding", file=src)
     log("i", "Re-encoding %s" % src)
     started = time.monotonic()
+    want = original.get("duration") or 0
     try:
-        run_ffmpeg(cmd, original.get("duration") or 0)
-        if ffprobe:
+        run_ffmpeg(cmd, want)
+        if tools.ffprobe:
             try:
-                got = probe_duration(ffprobe, part)
+                got = probe_duration(tools.ffprobe, part)
             except Exception as e:
                 raise PluginError("ffprobe can't read the new file: %s" % e)
-            want = original.get("duration") or 0
             if want and abs(got - want) > max(2.0, want * 0.01):
                 raise PluginError("new file is %.1fs long but the original is %.1fs" % (got, want))
     except BaseException:
@@ -578,7 +784,7 @@ def encode(stash, args):
                 {
                     "input": {
                         "ids": [original["id"]],
-                        "destination_folder": os.path.dirname(src),
+                        "destination_folder": stash_pathmod(src_stash).dirname(src_stash),
                         "destination_basename": original_rename,
                     }
                 },
@@ -587,7 +793,7 @@ def encode(stash, args):
         except Exception as e:
             log("w", "could not rename the original (%s); keeping its name" % e)
             target = pick_free_suffix(target)
-    os.rename(part, target)
+    move_into_place(part, target)
 
     size = os.path.getsize(target)
     log(
@@ -601,57 +807,19 @@ def encode(stash, args):
             100.0 * size / original["size"] if original.get("size") else 0,
         ),
     )
+    return paths.to_stash(target)
 
-    scan_job = stash.call(
+
+def scan(stash, path):
+    return stash.call(
         "mutation ($input: ScanMetadataInput!) { metadataScan(input: $input) }",
-        {"input": {"paths": [target]}},
+        {"input": {"paths": [path]}},
     )["metadataScan"]
-    stash.run_task(
-        "Re-encode scene %s: finalize" % scene_id,
-        {
-            "mode": "finalize",
-            "scene_id": scene_id,
-            "new_path": target,
-            "original_file_id": original["id"],
-            "scan_job_id": scan_job,
-        },
-    )
-    write_state(scene_id, "finalizing", file=target)
-    return {"new_path": target}
 
 
-def pick_free_suffix(target):
-    stem, ext = os.path.splitext(target)
-    for n in range(1, 100):
-        path = "%s%s%s" % (stem, ".reencoded" if n == 1 else ".reencoded%d" % n, ext)
-        if not os.path.exists(path):
-            return path
-    raise PluginError("no free file name for %s" % target)
-
-
-def human_size(n):
-    for unit in ("B", "KiB", "MiB", "GiB"):
-        if n < 1024:
-            return "%.1f %s" % (n, unit)
-        n /= 1024.0
-    return "%.1f TiB" % n
-
-
-def finalize(stash, args):
-    scene_id = str(args["scene_id"])
-    new_path = args["new_path"]
-    original_file_id = str(args["original_file_id"])
-    settings = stash.settings()
-
-    # the queue is serial, so the scan has normally finished already
-    scan_job = args.get("scan_job_id")
-    deadline = time.monotonic() + 3600
-    while scan_job and time.monotonic() < deadline:
-        status = stash.job_status(scan_job)
-        if status in (None, "FINISHED", "CANCELLED", "FAILED"):
-            break
-        time.sleep(2)
-
+def swap(stash, scene_id, new_path, original_file_id, settings):
+    """Makes the scanned new file the scene's primary file and splits the
+    original off. Returns the id of the original's new scene, if any."""
     found = stash.scenes_with_file(new_path)
     if not found:
         raise PluginError(
@@ -661,9 +829,13 @@ def finalize(stash, args):
 
     scene = stash.scene(scene_id)
     if new_scene["id"] != scene["id"]:
+        # The scan made a scene for the new file. The file is that scene's
+        # primary, which sceneAssignFile refuses to move, so merge the scene
+        # in instead: its files move over, the scene's own metadata and
+        # primary file stay, and the scan-made scene is deleted.
         stash.call(
-            "mutation ($input: AssignSceneFileInput!) { sceneAssignFile(input: $input) }",
-            {"input": {"scene_id": scene_id, "file_id": new_file["id"]}},
+            "mutation ($input: SceneMergeInput!) { sceneMerge(input: $input) { id } }",
+            {"input": {"source": [new_scene["id"]], "destination": scene_id}},
         )
     stash.call(
         "mutation ($input: SceneUpdateInput!) { sceneUpdate(input: $input) { id } }",
@@ -671,16 +843,9 @@ def finalize(stash, args):
     )
     log("i", "Scene %s now uses %s" % (scene_id, new_path))
 
-    # the scan made a scene for the new file; it is empty now
-    if new_scene["id"] != scene["id"] and len(new_scene["files"]) == 1:
-        stash.call(
-            "mutation ($input: SceneDestroyInput!) { sceneDestroy(input: $input) }",
-            {"input": {"id": new_scene["id"], "delete_file": False, "delete_generated": False}},
-        )
-
     archive_id = None
     if not settings.get("keepOriginalAttached"):
-        original = next((f for f in scene["files"] if str(f["id"]) == original_file_id), None)
+        original = next((f for f in scene["files"] if str(f["id"]) == str(original_file_id)), None)
         if original:
             tag_id = stash.ensure_tag(tag_name(settings))
             data = stash.call(
@@ -692,7 +857,7 @@ def finalize(stash, args):
                         % (scene_id, datetime.date.today().isoformat()),
                         "organized": True,
                         "tag_ids": [tag_id],
-                        "file_ids": [original_file_id],
+                        "file_ids": [str(original_file_id)],
                     }
                 },
             )
@@ -715,32 +880,69 @@ def finalize(stash, args):
                 }
             },
         )
+    return archive_id
 
-    write_state(scene_id, "done", file=new_path, original_scene=archive_id)
+
+# --- plugin modes --------------------------------------------------------------------
+
+
+def plugin_encode(stash, conn, args):
+    scene_id = str(args.get("scene_id") or "")
+    if not scene_id:
+        raise PluginError("run this from the Reencode button on a scene's edit panel")
+    settings = stash.settings()
+    original = check_scene(stash.scene(scene_id), settings)
+
+    cfg_ffmpeg, cfg_ffprobe = stash.ffmpeg_config()
+    ffmpeg = find_tool("ffmpeg", (settings.get("ffmpegPath") or "").strip() or cfg_ffmpeg, conn.get("Dir") or "")
+    if not ffmpeg:
+        raise PluginError("ffmpeg not found; set its path in the plugin settings")
+    tools = Tools(ffmpeg, find_ffprobe(ffmpeg, cfg_ffprobe))
+
+    write_state(scene_id, "encoding", file=original["path"])
+    target = encode_file(stash, original, settings, tools, PathMap())
+    scan_job = scan(stash, target)
+    stash.run_task(
+        "Re-encode scene %s: finalize" % scene_id,
+        {
+            "mode": "finalize",
+            "scene_id": scene_id,
+            "new_path": target,
+            "original_file_id": original["id"],
+            "scan_job_id": scan_job,
+        },
+    )
+    write_state(scene_id, "finalizing", file=target)
+    return {"new_path": target}
+
+
+def plugin_finalize(stash, args):
+    scene_id = str(args["scene_id"])
+    settings = stash.settings()
+    # the queue is serial, so the scan has normally finished already
+    if args.get("scan_job_id"):
+        stash.wait_for_job(args["scan_job_id"], timeout=3600, what="scan")
+    archive_id = swap(stash, scene_id, args["new_path"], args["original_file_id"], settings)
+    write_state(scene_id, "done", file=args["new_path"], original_scene=archive_id)
     return {"scene_id": scene_id, "original_scene_id": archive_id}
 
 
-def status(args):
-    return read_state(str(args.get("scene_id") or "")) or {"state": "none"}
-
-
-def main():
+def plugin_main():
     raw = sys.stdin.read()
     data = json.loads(raw) if raw.strip() else {}
     args = data.get("args") or {}
+    conn = data.get("server_connection") or {}
     mode = args.get("mode")
     scene_id = str(args.get("scene_id") or "")
     try:
         if mode == "status":
-            result = status(args)
+            result = read_state(scene_id) or {"state": "none"}
+        elif mode == "encode":
+            result = plugin_encode(Stash.from_plugin(conn), conn, args)
+        elif mode == "finalize":
+            result = plugin_finalize(Stash.from_plugin(conn), args)
         else:
-            stash = Stash(data.get("server_connection") or {})
-            if mode == "encode":
-                result = encode(stash, args)
-            elif mode == "finalize":
-                result = finalize(stash, args)
-            else:
-                raise PluginError("unknown mode %r" % mode)
+            raise PluginError("unknown mode %r" % mode)
         print(json.dumps({"output": result}))
     except Exception as e:
         msg = str(e) or e.__class__.__name__
@@ -748,6 +950,212 @@ def main():
         if mode in ("encode", "finalize"):
             write_state(scene_id, "error", message=msg)
         print(json.dumps({"error": msg}))
+
+
+# --- command line ------------------------------------------------------------------------
+
+
+class DeferInterrupt:
+    """Holds off Ctrl+C while Stash is mid-swap, so a scene isn't left half done."""
+
+    def __enter__(self):
+        self.hit = False
+        try:
+            self.old = signal.signal(signal.SIGINT, self._handler)
+        except ValueError:  # not the main thread
+            self.old = None
+        return self
+
+    def _handler(self, *_):
+        if not self.hit:
+            log("w", "Finishing this scene first, then stopping.")
+        self.hit = True
+
+    def __exit__(self, *exc):
+        if self.old is not None:
+            signal.signal(signal.SIGINT, self.old)
+        return False
+
+
+CLI_SETTINGS = [
+    # (flag, setting key, help)
+    ("--video-codec", "videoCodec", "ffmpeg video encoder, e.g. libsvtav1, libx265, hevc_nvenc, av1_qsv"),
+    ("--video-args", "videoArgs", "video encoder options, e.g. --video-args=\"-crf 28 -preset 4\""),
+    ("--audio-codec", "audioCodec", "ffmpeg audio encoder, or copy"),
+    ("--audio-args", "audioArgs", "audio encoder options"),
+    ("--container", "container", "extension of the new file: mp4, mkv, webm, ..."),
+    ("--input-args", "inputArgs", "options placed before -i, e.g. --input-args=\"-hwaccel cuda\""),
+    ("--extra-args", "extraArgs", "options added after the codec options"),
+    ("--output-args", "outputArgs", "replace all generated output options with these"),
+    ("--original-tag", "tagName", "tag for scenes holding an original (default {ORIGINAL})"),
+]
+
+
+def cli_parser():
+    p = argparse.ArgumentParser(
+        prog="reencode.py",
+        description=(
+            "Re-encode every Stash scene with a tag on this machine, then swap the new file "
+            "in the way the Reencode button does. Encoder settings come from the Reencode "
+            "plugin's settings in Stash, if it is installed; the options below override them."
+        ),
+        epilog=(
+            "Stash reports file paths as its own machine sees them. Use --map to say where "
+            "they are on this machine, e.g. --map /data=//nas/media or --map /data=Z:\\ "
+            "(repeat for each library folder). Options whose value starts with - need the "
+            "--option=value form."
+        ),
+    )
+    p.add_argument("--stash", required=True, metavar="URL", help="Stash's address, e.g. http://nas:9999")
+    p.add_argument(
+        "--api-key",
+        default=os.environ.get("STASH_API_KEY"),
+        help="API key from Stash's Settings > Security, if it has a password (default: $STASH_API_KEY)",
+    )
+    p.add_argument("--tag", required=True, help="re-encode the scenes with this tag; it is removed from each one that finishes")
+    p.add_argument("--map", action="append", default=[], metavar="STASH_PATH=LOCAL_PATH", help="where a Stash folder is on this machine")
+    p.add_argument("--ffmpeg", help="ffmpeg to use (default: ffmpeg on the PATH)")
+    p.add_argument("--limit", type=int, metavar="N", help="stop after N scenes")
+    p.add_argument("--dry-run", action="store_true", help="list what would be done and check the files can be found")
+    p.add_argument("--keep-original-attached", action="store_true", help="leave the original on the scene instead of splitting it off")
+    p.add_argument("--no-generate", action="store_true", help="don't queue preview/sprite/phash generation in Stash")
+    p.add_argument("--insecure", action="store_true", help="don't verify Stash's HTTPS certificate")
+    p.add_argument("-v", "--verbose", action="store_true", help="also show debug messages, such as the ffmpeg command")
+    for flag, _, help_text in CLI_SETTINGS:
+        p.add_argument(flag, help=help_text)
+    return p
+
+
+def cli_main(argv):
+    global CLI, VERBOSE
+    CLI = True
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="replace")  # paths a Windows console can't show
+        except AttributeError:
+            pass
+
+    opts = cli_parser().parse_args(argv)
+    VERBOSE = opts.verbose
+    try:
+        return run_cli(opts)
+    except PluginError as e:
+        log("e", e)
+        return 2
+    except KeyboardInterrupt:
+        log("w", "Stopped.")
+        return 130
+
+
+def run_cli(opts):
+    headers = {"ApiKey": opts.api_key} if opts.api_key else {}
+    url = opts.stash if "://" in opts.stash else "http://" + opts.stash
+    stash = Stash(url, headers, verify=not opts.insecure)
+    paths = PathMap.parse(opts.map)
+
+    try:
+        settings = stash.settings()
+    except PluginError as e:
+        if "can't reach" in str(e) or "refused" in str(e):
+            raise
+        log("d", "no Reencode plugin settings: %s" % e)
+        settings = {}
+    for flag, key, _ in CLI_SETTINGS:
+        value = getattr(opts, flag[2:].replace("-", "_"))
+        if value is not None:
+            settings[key] = value
+    if opts.keep_original_attached:
+        settings["keepOriginalAttached"] = True
+    if opts.no_generate:
+        settings["skipGenerate"] = True
+
+    tag_id = stash.find_tag(opts.tag)
+    if not tag_id:
+        raise PluginError("Stash has no tag named %s" % opts.tag)
+    scenes = stash.scenes_with_tag(tag_id)
+    if opts.limit is not None:
+        scenes = scenes[: max(opts.limit, 0)]
+    log("i", "%d scene(s) tagged %s" % (len(scenes), opts.tag))
+    if not scenes:
+        return 0
+
+    if opts.dry_run:
+        return dry_run(scenes, settings, paths)
+
+    ffmpeg = find_tool("ffmpeg", opts.ffmpeg)
+    if not ffmpeg:
+        raise PluginError("ffmpeg not found; put it on the PATH or pass --ffmpeg")
+    tools = Tools(ffmpeg, find_ffprobe(ffmpeg))
+    if not tools.ffprobe:
+        log("w", "ffprobe not found next to ffmpeg or on the PATH; new files won't be checked")
+    log("i", "Encoding with %s, .%s" % (
+        "custom output options" if (settings.get("outputArgs") or "").strip() else video_encoder(settings, tools.encoders),
+        container(settings),
+    ))
+
+    done = failed = 0
+    for i, scene in enumerate(scenes, 1):
+        log("i", "")
+        log("i", "[%d/%d] scene %s: %s" % (
+            i, len(scenes), scene["id"], scene["title"] or (scene["files"][0]["basename"] if scene["files"] else "")))
+        try:
+            stop = cli_scene(stash, scene, tag_id, settings, tools, paths)
+            done += 1
+        except PluginError as e:
+            log("e", e)
+            failed += 1
+            continue
+        if stop:
+            break
+
+    log("i", "")
+    log("i", "%d re-encoded, %d failed, %d not started" % (done, failed, len(scenes) - done - failed))
+    return 1 if failed else 0
+
+
+def cli_scene(stash, scene, trigger_tag_id, settings, tools, paths):
+    """Re-encodes one scene. Returns True if the user asked to stop."""
+    original = check_scene(scene, settings)
+    new_path = encode_file(stash, original, settings, tools, paths)
+    with DeferInterrupt() as deferred:
+        log("i", "Scanning %s in Stash" % new_path)
+        stash.wait_for_job(scan(stash, new_path), what="scan")
+        swap(stash, scene["id"], new_path, original["id"], settings)
+        stash.remove_tag(scene["id"], trigger_tag_id)
+    return deferred.hit
+
+
+def dry_run(scenes, settings, paths):
+    ext = container(settings)
+    missing = 0
+    for scene in scenes:
+        try:
+            original = check_scene(scene, settings)
+            local = paths.to_local(original["path"])
+        except PluginError as e:
+            log("e", "scene %s: %s" % (scene["id"], e))
+            missing += 1
+            continue
+        if not os.path.isfile(local):
+            log("e", "scene %s: %s not found on this machine" % (scene["id"], local))
+            missing += 1
+            continue
+        target, rename = pick_names(local, ext)
+        log("i", "scene %s: %s (%s, %s)" % (
+            scene["id"], local, original.get("video_codec") or "?", human_size(original.get("size") or 0)))
+        log("i", "    -> %s%s" % (target, "  (original renamed to %s)" % rename if rename else ""))
+    if missing:
+        log("e", "%d scene(s) can't be re-encoded from here" % missing)
+    return 1 if missing else 0
+
+
+def main():
+    if len(sys.argv) > 1:
+        sys.exit(cli_main(sys.argv[1:]))
+    if sys.stdin.isatty():
+        cli_parser().print_help()
+        sys.exit(2)
+    plugin_main()
 
 
 if __name__ == "__main__":
