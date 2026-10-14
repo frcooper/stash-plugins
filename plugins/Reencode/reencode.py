@@ -190,6 +190,14 @@ class Stash:
         data = self.call('query { configuration { plugins(include: ["%s"]) } }' % PLUGIN_ID)
         return (data["configuration"]["plugins"] or {}).get(PLUGIN_ID) or {}
 
+    def plugin_enabled(self):
+        """True or False, or None if Stash can't say."""
+        try:
+            plugins = self.call("query { plugins { id enabled } }")["plugins"] or []
+        except PluginError:
+            return None
+        return any(p["id"] == PLUGIN_ID and p["enabled"] for p in plugins)
+
     def ffmpeg_config(self):
         try:
             g = self.call("query { configuration { general { ffmpegPath ffprobePath } } }")
@@ -1068,6 +1076,16 @@ def run_cli(opts):
         settings["keepOriginalAttached"] = True
     if opts.no_generate:
         settings["skipGenerate"] = True
+
+    # Everything here works without the plugin, except hiding the originals,
+    # which its UI code does in the browser
+    if not settings.get("keepOriginalAttached") and stash.plugin_enabled() is False:
+        log(
+            "w",
+            "The Reencode plugin isn't enabled in this Stash, so scenes tagged %s won't be hidden "
+            "from its lists. Install it to hide them, or pass --keep-original-attached to keep each "
+            "original on its scene instead." % tag_name(settings),
+        )
 
     tag_id = stash.find_tag(opts.tag)
     if not tag_id:

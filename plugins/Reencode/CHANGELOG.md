@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.1
+
+- The button now only shows "Reencode", or the percentage done while a re-encode runs. How the last run ended is in its tooltip.
+- The button stays the same width in both states, and is never wider than the "Scrape with…" button.
+- The button copies its font from the Save and Delete buttons, and uses Stash's own warning (orange) button style.
+- The command-line script warns when the plugin isn't enabled in the target Stash: without it, scenes tagged {ORIGINAL} aren't hidden from Stash's lists.
+
 ## 0.2.0
 
 - Fixed the swap failing with "cannot reassign primary file": the scene Stash makes when it scans the new file is now merged into the original scene.

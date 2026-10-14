@@ -2,7 +2,7 @@
 
 A Stash plugin that re-encodes a scene's file with ffmpeg and swaps the new file in, so the scene looks like it had the new file all along.
 
-- An orange **Reencode** button on the scene's **Edit** tab, between Delete and the scrape buttons. While the job runs, it shows the progress.
+- An orange **Reencode** button on the scene's **Edit** tab, between Delete and the scrape buttons. While a re-encode runs, it shows the percentage done. Hover it afterwards to see how the last run ended.
 - The new file is written next to the original and becomes the scene's file. Everything else stays on the scene as it is: title, performers, tags, markers, play and O history, groups, galleries, stash IDs, cover.
 - The original file moves to its own scene tagged `{ORIGINAL}`. Scenes with that tag are hidden from every scene list, and only show up when you filter by the tag (e.g. open the tag's page).
 
@@ -76,7 +76,12 @@ If Stash has a password, pass an API key from **Settings → Security** with `--
 
 Each scene that finishes has the tag removed, so a stopped run can be started again and picks up where it left off. Ctrl+C during an encode stops it and deletes the partial file. Ctrl+C while Stash is swapping the file in finishes that scene first, then stops.
 
-Encoder settings come from the plugin's settings in Stash, so the button and the script produce the same files. The plugin doesn't need to be installed, though. These options override the settings: `--video-codec`, `--video-args`, `--audio-codec`, `--audio-args`, `--container`, `--input-args`, `--extra-args`, `--output-args`, `--original-tag`, `--keep-original-attached`, `--no-generate`. Values that start with `-` need the `=` form, e.g. `--video-args="-crf 28 -preset 4"`. Other options: `--ffmpeg PATH`, `--limit N`, `--insecure` (self-signed HTTPS), `-v` (show the ffmpeg command). Run `python reencode.py --help` for the full list.
+The plugin doesn't need to be installed in Stash for the script to work. Without it:
+
+- The script uses the default settings, or the options below.
+- Scenes tagged `{ORIGINAL}` aren't hidden from Stash's lists, because the hiding is done by the plugin in the browser. The script warns about this. Pass `--keep-original-attached` to keep each original on its scene as a second file instead of creating separate scenes.
+
+When the plugin is installed, the script uses its settings, so the button and the script produce the same files. These options override the settings: `--video-codec`, `--video-args`, `--audio-codec`, `--audio-args`, `--container`, `--input-args`, `--extra-args`, `--output-args`, `--original-tag`, `--keep-original-attached`, `--no-generate`. Values that start with `-` need the `=` form, e.g. `--video-args="-crf 28 -preset 4"`. Other options: `--ffmpeg PATH`, `--limit N`, `--insecure` (self-signed HTTPS), `-v` (show the ffmpeg command). Run `python reencode.py --help` for the full list.
 
 Stash still generates previews, sprites and the phash for each new file unless you pass `--no-generate`. That runs on the Stash host.
 

@@ -14,7 +14,8 @@
   let settings = {};
   let originalTagId = null;
 
-  // scene id -> { label, title, busy }
+  // scene id -> { busy, percent, title }. The button shows "Reencode" when
+  // idle and the percentage while busy; how a run ended goes in the tooltip.
   const runs = new Map();
   let pollTimer = null;
 
@@ -255,11 +256,11 @@
       },
     });
 
-    track(sceneId, "Queued");
+    track(sceneId);
   }
 
-  function track(sceneId, label) {
-    runs.set(sceneId, { label, title: "", busy: true });
+  function track(sceneId) {
+    runs.set(sceneId, { busy: true, percent: 0, title: "" });
     renderButtons();
     if (!pollTimer) pollTimer = setInterval(poll, POLL_MS);
   }
@@ -282,11 +283,11 @@
       if (!run.busy) continue;
       const a = active.get(sceneId);
       if (a) {
-        if (a.job.status === "READY") run.label = "Queued";
-        else if (a.finalize) run.label = "Finishing…";
-        else if (a.job.progress > 0)
-          run.label = "Re-encoding " + Math.floor(a.job.progress * 100) + "%";
-        else run.label = "Re-encoding…";
+        // the encode is all but the last moment of a run, so its progress
+        // is the run's; once it ends, the scan and swap show as 100%
+        if (a.finalize) run.percent = 100;
+        else if (a.job.status === "RUNNING" && a.job.progress > 0)
+          run.percent = Math.min(99, Math.floor(a.job.progress * 100));
         continue;
       }
 
@@ -295,20 +296,16 @@
       try {
         const s = await fetchStatus(sceneId);
         if (s.state === "done") {
-          run.label = "Re-encoded";
-          run.title = s.file || "";
+          run.title = "Re-encoded to " + (s.file || "a new file");
           await loadTagId();
           getClient().refetchQueries({ include: "active" });
         } else if (s.state === "error") {
-          run.label = "Re-encode failed";
-          run.title = s.message || "See the Stash log.";
+          run.title = "Last re-encode failed: " + (s.message || "see the Stash log");
         } else {
-          run.label = "Re-encode stopped";
-          run.title = "The job was cancelled or the plugin exited early. See the Stash log.";
+          run.title = "Last re-encode was cancelled or stopped early; see the Stash log";
         }
       } catch (e) {
-        run.label = "Re-encode failed";
-        run.title = String(e.message || e);
+        run.title = "Last re-encode failed: " + (e.message || e);
       }
     }
 
@@ -328,7 +325,7 @@
         const m = JOB_RE.exec(job.description || "");
         return m && m[1] === sceneId;
       });
-      if (running && !runs.has(sceneId)) track(sceneId, "Re-encoding…");
+      if (running && !runs.has(sceneId)) track(sceneId);
     } catch (e) {
       // ignore
     }
@@ -341,11 +338,30 @@
     return m ? m[1] : null;
   }
 
+  // Match the neighbouring buttons' text, whatever the theme or custom CSS
+  // does to them, and never grow wider than "Scrape with…".
+  function matchNeighbours(btn) {
+    const container = btn.closest(".edit-buttons-container") || document;
+    const like = container.querySelector(".edit-buttons .btn:not(.reencode-button)");
+    if (like) {
+      const cs = window.getComputedStyle(like);
+      for (const prop of ["fontFamily", "fontSize", "fontWeight", "letterSpacing", "lineHeight", "textTransform"]) {
+        btn.style[prop] = cs[prop];
+      }
+    }
+    const scrape = container.querySelector(".scraper-group .dropdown-toggle");
+    if (scrape && scrape.offsetWidth > 0) btn.style.maxWidth = scrape.offsetWidth + "px";
+  }
+
   function renderButton(btn) {
     const run = runs.get(btn.dataset.sceneId);
-    btn.disabled = !!(run && run.busy);
-    btn.textContent = run ? run.label : "Reencode";
-    btn.title = run && run.title ? run.title : "Re-encode this scene's file";
+    const busy = !!(run && run.busy);
+    btn.disabled = busy;
+    btn.querySelector(".reencode-label").textContent = busy ? run.percent + "%" : "Reencode";
+    btn.title = busy
+      ? "Re-encoding this scene's file"
+      : (run && run.title) || "Re-encode this scene's file";
+    matchNeighbours(btn);
   }
 
   function renderButtons() {
@@ -358,13 +374,21 @@
     if (!sceneId || !bar) return;
 
     const existing = bar.querySelector(".reencode-button");
-    if (existing && existing.dataset.sceneId === sceneId) return;
+    if (existing && existing.dataset.sceneId === sceneId) {
+      // the scrape button may only now be laid out (e.g. the tab just opened)
+      matchNeighbours(existing);
+      return;
+    }
     if (existing) existing.remove();
 
     const btn = document.createElement("button");
     btn.type = "button";
-    btn.className = "btn edit-button reencode-button";
+    btn.className = "btn btn-warning edit-button reencode-button";
     btn.dataset.sceneId = sceneId;
+    // the hidden copy of "Reencode" keeps the width the same while the
+    // percentage shows
+    btn.innerHTML =
+      '<span class="reencode-label"></span><span class="reencode-sizer" aria-hidden="true">Reencode</span>';
     btn.addEventListener("click", () => {
       const run = runs.get(sceneId);
       if (run && run.busy) return;
