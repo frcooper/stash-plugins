@@ -44,14 +44,17 @@ STATE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state")
 DEFAULT_VIDEO_ENCODERS = ["libsvtav1", "libx265"]
 
 VIDEO_DEFAULT_ARGS = {
-    "libsvtav1": "-crf 30 -preset 6 -pix_fmt yuv420p10le",
+    "libsvtav1": "-crf 28 -preset 4 -pix_fmt yuv420p10le -g 240"
+    " -svtav1-params tune=0:enable-variance-boost=1",
     "libaom-av1": "-crf 30 -b:v 0 -cpu-used 4 -row-mt 1 -pix_fmt yuv420p10le",
     "librav1e": "-qp 80 -speed 6",
     "av1_nvenc": "-preset p6 -rc vbr -cq 32 -b:v 0",
     "av1_qsv": "-preset slow -global_quality 28",
     "av1_amf": "-quality quality -rc cqp -qp_i 120 -qp_p 120",
     "libx265": "-crf 24 -preset medium -pix_fmt yuv420p10le",
-    "hevc_nvenc": "-preset p6 -rc vbr -cq 26 -b:v 0",
+    "hevc_nvenc": "-preset p7 -tune hq -rc vbr -cq 24 -b:v 0 -multipass fullres"
+    " -rc-lookahead 32 -spatial-aq 1 -temporal-aq 1 -bf 4 -b_ref_mode middle"
+    " -pix_fmt p010le -profile:v main10",
     "hevc_qsv": "-preset slow -global_quality 24",
     "hevc_amf": "-quality quality -rc cqp -qp_i 24 -qp_p 24",
     "hevc_videotoolbox": "-q:v 60",

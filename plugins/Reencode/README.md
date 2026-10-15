@@ -38,8 +38,8 @@ If anything fails before the swap is confirmed, the original isn't touched.
 
 | Setting | Effect |
 |---|---|
-| Video encoder | Any ffmpeg encoder (`libsvtav1`, `libx265`, `hevc_nvenc`, `av1_qsv`, `copy`, …). Blank: `libsvtav1`, falling back to `libx265`. |
-| Video encoder options | Blank uses defaults for known encoders, e.g. `-crf 30 -preset 6 -pix_fmt yuv420p10le` for `libsvtav1`, `-crf 24 -preset medium -pix_fmt yuv420p10le` for `libx265`. |
+| Video encoder | Any ffmpeg encoder (`libsvtav1`, `libx265`, `hevc_nvenc`, `av1_qsv`, `copy`, …). Blank: `libsvtav1`, falling back to `libx265`. `av1_nvenc` needs an NVIDIA 40-series card or newer; on older NVIDIA cards use `hevc_nvenc`. |
+| Video encoder options | Blank uses defaults for known encoders, e.g. `-crf 28 -preset 4 -pix_fmt yuv420p10le -g 240 -svtav1-params tune=0:enable-variance-boost=1` for `libsvtav1`, `-crf 24 -preset medium -pix_fmt yuv420p10le` for `libx265`. The `hevc_nvenc` defaults need a 20-series card or newer; on older cards remove `-bf 4 -b_ref_mode middle`. |
 | Audio encoder | Any ffmpeg encoder, or `copy`. Blank: copy if browsers can play it, otherwise `aac` (`libopus` for webm). |
 | Audio encoder options | Blank: `-b:a 192k` when encoding. |
 | Container | Extension of the new file: `mp4`, `mkv`, `webm`, … Blank: `mp4`. MKV keeps subtitles and attachments; MP4 and WebM drop subtitles. |

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.0
+
+- The default `libsvtav1` options favour quality and file size over speed: `-crf 28 -preset 4 -pix_fmt yuv420p10le -g 240 -svtav1-params tune=0:enable-variance-boost=1` (was `-crf 30 -preset 6 -pix_fmt yuv420p10le`). Encodes take about twice as long. Set **Video encoder options** to the old value to keep the old speed.
+- The default `hevc_nvenc` options use NVENC's slowest preset, two-pass analysis, lookahead, adaptive quantisation, B-frames as references and 10-bit output: `-preset p7 -tune hq -rc vbr -cq 24 -b:v 0 -multipass fullres -rc-lookahead 32 -spatial-aq 1 -temporal-aq 1 -bf 4 -b_ref_mode middle -pix_fmt p010le -profile:v main10`. They need a 20-series card or newer.
+- The settings and README note that `av1_nvenc` needs an NVIDIA 40-series card or newer.
+
 ## 0.3.0
 
 - **Originals are now deleted by default** once the new file is in place and Stash confirms the scene uses it. Deletion goes through Stash, so Stash's trash folder is used if you've set one.

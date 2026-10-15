@@ -1,6 +1,6 @@
 name: Reencode
 description: Adds a Reencode button to the scene edit panel. It re-encodes the scene's file with ffmpeg and swaps the new file in as the scene's file, then deletes the original or moves it to a backup folder.
-version: 0.3.0
+version: 0.4.0
 url: https://github.com/frcooper/stash-plugins/tree/main/plugins/Reencode
 exec:
   - python
@@ -14,11 +14,11 @@ ui:
 settings:
   videoCodec:
     displayName: Video encoder
-    description: Any ffmpeg encoder, e.g. libsvtav1, libx265, hevc_nvenc, av1_qsv, or copy. Blank uses libsvtav1 (AV1), or libx265 (HEVC) if your ffmpeg doesn't have it.
+    description: Any ffmpeg encoder, e.g. libsvtav1, libx265, hevc_nvenc, av1_qsv, or copy. Blank uses libsvtav1 (AV1), or libx265 (HEVC) if your ffmpeg doesn't have it. av1_nvenc needs an NVIDIA 40-series or newer.
     type: STRING
   videoArgs:
     displayName: Video encoder options
-    description: "Blank uses defaults for the encoder, e.g. libsvtav1: -crf 30 -preset 6 -pix_fmt yuv420p10le."
+    description: "Blank uses defaults for the encoder, e.g. libsvtav1: -crf 28 -preset 4 -pix_fmt yuv420p10le -g 240 -svtav1-params tune=0:enable-variance-boost=1."
     type: STRING
   audioCodec:
     displayName: Audio encoder
