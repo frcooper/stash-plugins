@@ -1,0 +1,192 @@
+/* Stash's A/B loop buttons (Settings → Interface → Show A/B loop controls);
+   this plugin replaces them */
+.video-js .abLoopButton {
+  display: none !important;
+}
+
+/* loop line: sits above the seek bar, positioned and coloured from script.
+   The track is the hit area; the line inside it is the visible bar. */
+.video-js .pbl-track {
+  cursor: crosshair;
+  display: none;
+  position: absolute;
+  touch-action: none;
+  user-select: none;
+  z-index: 2;
+}
+
+.video-js .pbl-track.has-layout.is-ready {
+  display: block;
+}
+
+.video-js .pbl-line {
+  background: var(--pbl-bg);
+  height: var(--pbl-thick);
+  left: 0;
+  position: absolute;
+  right: 0;
+  top: var(--pbl-head);
+}
+
+/* graduations; white drawn with difference shows on both the line and the
+   loop region */
+.video-js .pbl-ticks {
+  bottom: 0;
+  height: calc(var(--pbl-thick) + 4px);
+  left: 0;
+  mix-blend-mode: difference;
+  pointer-events: none;
+  position: absolute;
+  width: 100%;
+}
+
+.video-js .pbl-region {
+  background: var(--pbl-fg);
+  bottom: 0;
+  display: none;
+  opacity: 0.45;
+  position: absolute;
+  top: 0;
+}
+
+.video-js .pbl-region.is-shown {
+  display: block;
+}
+
+.video-js .pbl-region.is-active {
+  opacity: 0.9;
+}
+
+/* a mark is a stem standing on the line with a flag on top: the start flag
+   points into the loop to the right, the end flag to the left */
+.video-js .pbl-mark {
+  --pbl-mark: var(--pbl-fg);
+  --pbl-edge: var(--pbl-fg-raw);
+  bottom: 0;
+  cursor: ew-resize;
+  filter: drop-shadow(0 0 1px var(--pbl-edge));
+  height: calc(var(--pbl-thick) + var(--pbl-head));
+  position: absolute;
+  transform: translateX(-50%);
+  width: 14px;
+  z-index: 1;
+}
+
+.video-js .pbl-mark.is-selected {
+  --pbl-mark: var(--pbl-fg-raw);
+  --pbl-edge: var(--pbl-fg);
+}
+
+.video-js .pbl-mark.is-removing {
+  opacity: 0.35;
+}
+
+.video-js .pbl-mark::before {
+  background: var(--pbl-mark);
+  bottom: 0;
+  content: "";
+  left: 6px;
+  position: absolute;
+  top: 0;
+  width: 2px;
+}
+
+.video-js .pbl-mark::after {
+  border: 4px solid transparent;
+  border-left: 6px solid var(--pbl-mark);
+  content: "";
+  left: 7px;
+  position: absolute;
+  top: 0;
+}
+
+.video-js .pbl-mark.is-end::after {
+  border-left: 0;
+  border-right: 6px solid var(--pbl-mark);
+  left: auto;
+  right: 7px;
+}
+
+/* a lone mark has no direction yet: a square head */
+.video-js .pbl-mark:not(.is-start):not(.is-end)::after {
+  background: var(--pbl-mark);
+  border: 0;
+  height: 6px;
+  left: 4px;
+  width: 6px;
+}
+
+.video-js .pbl-tip {
+  background: rgba(0, 0, 0, 0.8);
+  border-radius: 3px;
+  bottom: 100%;
+  color: #fff;
+  display: none;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.4;
+  margin-bottom: 2px;
+  padding: 1px 5px;
+  pointer-events: none;
+  position: absolute;
+  transform: translateX(-50%);
+  white-space: nowrap;
+}
+
+.video-js .pbl-tip.is-shown {
+  display: block;
+}
+
+.video-js .pbl-buttons {
+  display: flex;
+  flex: none;
+}
+
+.video-js .pbl-button {
+  cursor: pointer;
+  flex: none;
+}
+
+.video-js .pbl-button svg {
+  fill: currentColor;
+  height: 1.3em;
+  width: 1.3em;
+}
+
+.video-js .pbl-button.is-active {
+  box-shadow: inset 0 -2px 0 currentColor;
+}
+
+.video-js .pbl-button.is-disabled {
+  cursor: default;
+  opacity: 0.35;
+}
+
+.video-js .pbl-button.is-busy {
+  cursor: progress;
+  opacity: 0.6;
+}
+
+.video-js .pbl-toast {
+  background: rgba(0, 0, 0, 0.75);
+  border-radius: 4px;
+  color: #fff;
+  font-size: 13px;
+  left: 50%;
+  opacity: 0;
+  padding: 0.4em 0.8em;
+  pointer-events: none;
+  position: absolute;
+  top: 1em;
+  transform: translateX(-50%);
+  transition: opacity 0.2s;
+  z-index: 3;
+}
+
+.video-js .pbl-toast.is-shown {
+  opacity: 1;
+}
+
+.video-js .pbl-toast.is-error {
+  background: rgba(160, 30, 30, 0.85);
+}
