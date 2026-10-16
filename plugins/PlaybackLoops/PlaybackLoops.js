@@ -132,15 +132,49 @@
     return Math.min(Math.max(t, 0), duration(player));
   }
 
-  function seekStart(player) {
+  // Seek for the loop. The `seeked` handler in attach() watches where it lands.
+  function loopSeek(player, t) {
     const s = player.playbackLoops_;
     s.last = null;
-    player.currentTime(startTime(s));
+    s.loopSeek = { t, until: performance.now() + 500, retried: false };
+    player.currentTime(t);
+  }
+
+  // If something else sends playback to the start of the video right after a
+  // loop seek, seek again once and say so in the console.
+  function checkLoopSeek(player) {
+    const s = player.playbackLoops_;
+    const target = s.loopSeek;
+    if (!target) return;
+    if (performance.now() > target.until) {
+      s.loopSeek = null;
+      return;
+    }
+    const now = player.currentTime();
+    if (now >= 0.5 || target.t < 1) return;
+    console.warn("[PlaybackLoops] loop seek to " + target.t.toFixed(3) + "s landed at " + now.toFixed(3) + "s");
+    if (target.retried) {
+      s.loopSeek = null;
+      return;
+    }
+    target.retried = true;
+    s.last = null;
+    player.currentTime(target.t);
+  }
+
+  function seekStart(player) {
+    loopSeek(player, startTime(player.playbackLoops_));
   }
 
   function endOfLoop(player) {
     const s = player.playbackLoops_;
     s.last = null;
+    console.debug("[PlaybackLoops] end of loop", {
+      mode: s.mode,
+      at: player.currentTime(),
+      marks: times(s),
+      to: s.mode === "once" ? lastFrameTime(s) : startTime(s),
+    });
     if (player.ended()) {
       // caught on the video's last timeupdate: its `ended` event is already
       // queued and must not reach video.js (which pauses) or Stash (which moves
@@ -150,9 +184,9 @@
     }
     if (s.mode === "once") {
       player.pause();
-      player.currentTime(lastFrameTime(s));
+      loopSeek(player, lastFrameTime(s));
     } else {
-      player.currentTime(startTime(s));
+      seekStart(player);
       if (player.paused()) play(player);
     }
   }
@@ -179,32 +213,37 @@
     }
   }
 
-  function toggleForever(player) {
+  // Loop once / loop forever. Pressing the one that's already on does nothing.
+  // Switching a mode on keeps the playhead where it is if it's inside the loop
+  // (so flipping between the two doesn't restart the loop), otherwise it goes
+  // to the start of the loop; either way playback starts.
+  function setMode(player, mode) {
     const s = player.playbackLoops_;
-    if (s.marks.length < 2) return;
-    if (s.mode === "forever") {
-      s.mode = "off";
-    } else {
-      s.mode = "forever";
-      const [a, b] = times(s);
-      const t = player.currentTime();
-      if (t < a || t >= b - 0.5 / fps()) seekStart(player);
-      if (player.paused()) play(player);
-    }
+    if (s.marks.length < 2 || s.mode === mode) return;
+    s.mode = mode;
+    const t = player.currentTime();
+    if (t < s.marks[0].t || t >= lastFrameTime(s) + 0.25 / fps()) seekStart(player);
+    if (player.paused()) play(player);
     update(player);
   }
 
+  function loopForever(player) {
+    setMode(player, "forever");
+  }
+
   function loopOnce(player) {
+    setMode(player, "once");
+  }
+
+  // Shift+L: switch looping off and back on without losing the marks
+  function toggleLooping(player) {
     const s = player.playbackLoops_;
-    if (s.marks.length < 2) return;
-    if (s.mode === "once" && !player.paused()) {
-      s.mode = "off";
+    if (s.mode === "off") {
+      setMode(player, "forever");
     } else {
-      s.mode = "once";
-      seekStart(player);
-      play(player);
+      s.mode = "off";
+      update(player);
     }
-    update(player);
   }
 
   // l: mark the current time, a third press clears both marks (as Stash's own
@@ -262,13 +301,17 @@
     return cutTagId;
   }
 
-  async function sceneTagIds(id) {
+  async function findScene(id) {
     const res = await getClient().query({
       query: gql`
-        query PlaybackLoopsSceneTags($id: ID!) {
+        query PlaybackLoopsScene($id: ID!) {
           findScene(id: $id) {
             tags {
               id
+            }
+            scene_markers {
+              seconds
+              end_seconds
             }
           }
         }
@@ -277,7 +320,8 @@
       fetchPolicy: "network-only",
     });
     const scene = res.data.findScene;
-    return scene ? scene.tags.map((t) => t.id) : [];
+    if (!scene) throw new Error("scene " + id + " not found");
+    return scene;
   }
 
   async function cut(player) {
@@ -293,10 +337,21 @@
     const [a, b] = times(s);
     const title = "F" + frameOf(a) + "-F" + frameOf(b);
     try {
-      const [tagId, tagIds] = await Promise.all([
-        findOrCreateCutTag(),
-        sceneTagIds(s.sceneId),
-      ]);
+      const scene = await findScene(s.sceneId);
+      // a marker over the same frames already exists: leave it at that
+      const exists = scene.scene_markers.some(
+        (m) =>
+          m.end_seconds != null &&
+          frameOf(m.seconds) === frameOf(a) &&
+          frameOf(m.end_seconds) === frameOf(b)
+      );
+      if (exists) {
+        toast(player, "Already cut: " + title);
+        return;
+      }
+
+      const tagId = await findOrCreateCutTag();
+      const tagIds = scene.tags.map((t) => t.id);
       await getClient().mutate({
         mutation: gql`
           mutation PlaybackLoopsCut($input: SceneMarkerCreateInput!) {
@@ -315,12 +370,35 @@
             tag_ids: tagIds.filter((id) => id !== tagId),
           },
         },
+        // what Stash's own marker create does (useSceneMarkerCreate): drop the
+        // cached marker data so the markers pane, the seek bar and the marker
+        // lists refetch
+        update(cache) {
+          cache.evict({
+            id: cache.identify({ __typename: "Scene", id: s.sceneId }),
+            fieldName: "scene_markers",
+          });
+          [tagId].concat(tagIds).forEach((id) =>
+            cache.evict({
+              id: cache.identify({ __typename: "Tag", id }),
+              fieldName: "scene_marker_count",
+            })
+          );
+          const DROP = (_value, { DELETE }) => DELETE;
+          cache.modify({
+            fields: {
+              findScenes: DROP,
+              findSceneMarkers: DROP,
+              markerStrings: DROP,
+              sceneMarkerTags: DROP,
+              findStudios: DROP,
+              findTags: DROP,
+            },
+          });
+          cache.gc();
+        },
       });
       toast(player, "Cut saved: " + title);
-      // show the new marker in the scene's marker list and on the seek bar
-      getClient()
-        .refetchQueries({ include: ["FindScene"] })
-        .catch(() => {});
     } catch (e) {
       console.error("[PlaybackLoops] cut failed", e);
       cutTagId = null;
@@ -465,10 +543,12 @@
     btn.once.classList.toggle("is-active", two && s.mode === "once");
     btn.forever.classList.toggle("is-active", two && s.mode === "forever");
     btn.cut.classList.toggle("is-busy", !!s.cutting);
-    [btn.once, btn.forever, btn.cut].forEach((b) => {
-      b.classList.toggle("is-disabled", !two);
-      b.setAttribute("aria-disabled", String(!two));
-    });
+    const disable = (b, off) => {
+      b.classList.toggle("is-disabled", off);
+      b.setAttribute("aria-disabled", String(off));
+    };
+    [btn.once, btn.forever, btn.cut].forEach((b) => disable(b, !two));
+    disable(btn.clear, s.marks.length === 0);
     btn.once.setAttribute("aria-pressed", String(two && s.mode === "once"));
     btn.forever.setAttribute("aria-pressed", String(two && s.mode === "forever"));
   }
@@ -590,6 +670,8 @@
       '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4zm-4-2V9h-1l-2 1v1h1.5v4H13z"/></svg>',
     forever:
       '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4z"/></svg>',
+    clear:
+      '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4z"/><path d="M3.5 2.1 21.9 20.5l-1.4 1.4L2.1 3.5z"/></svg>',
     cut:
       '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9.64 7.64c.23-.5.36-1.05.36-1.64 0-2.21-1.79-4-4-4S2 3.79 2 6s1.79 4 4 4c.59 0 1.14-.13 1.64-.36L10 12l-2.36 2.36C7.14 14.13 6.59 14 6 14c-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4c0-.59-.13-1.14-.36-1.64L12 14l7 7h3v-1L9.64 7.64zM6 8c-1.1 0-2-.89-2-2s.9-2 2-2 2 .89 2 2-.9 2-2 2zm0 12c-1.1 0-2-.89-2-2s.9-2 2-2 2 .89 2 2-.9 2-2 2zm6-7.5c-.28 0-.5-.22-.5-.5s.22-.5.5-.5.5.22.5.5-.22.5-.5.5zM19 3l-6 6 2 2 7-7V3z"/></svg>',
   };
@@ -694,9 +776,10 @@
       const group = document.createElement("div");
       group.className = "pbl-buttons";
       s.buttons.once = makeButton(player, "once", "Loop once (play the loop, then pause)", loopOnce);
-      s.buttons.forever = makeButton(player, "forever", "Loop forever (Shift+L)", toggleForever);
+      s.buttons.forever = makeButton(player, "forever", "Loop forever", loopForever);
       s.buttons.cut = makeButton(player, "cut", "Cut loop (save it as a {CUT} marker)", cut);
-      group.append(s.buttons.once, s.buttons.forever, s.buttons.cut);
+      s.buttons.clear = makeButton(player, "clear", "Clear loop (remove the marks, keep playing)", clearMarks);
+      group.append(s.buttons.once, s.buttons.forever, s.buttons.cut, s.buttons.clear);
       const anchor = bar.querySelector(".vjs-playback-rate, .vjs-fullscreen-control");
       if (anchor) anchor.before(group);
       else bar.append(group);
@@ -728,10 +811,12 @@
     player.on("seeking", () => {
       s.last = null;
     });
+    player.on("seeked", () => checkLoopSeek(player));
     player.on("timeupdate", () => check(player));
     player.on("play", () => {
-      // loop once: pressing play at the end of the loop plays it again
-      if (s.mode !== "once" || s.marks.length < 2) return;
+      // playing from the loop's last frame (where loop once stops) starts the
+      // loop again rather than running on past the end mark
+      if (!looping(s)) return;
       if (Math.abs(player.currentTime() - lastFrameTime(s)) < 1 / fps()) seekStart(player);
     });
     player.on(["fullscreenchange", "playerresize"], relayout);
@@ -767,7 +852,7 @@
         e.preventDefault();
         e.stopImmediatePropagation();
         if (e.repeat) return;
-        if (e.shiftKey) toggleForever(player);
+        if (e.shiftKey) toggleLooping(player);
         else markHere(player);
         return;
       }
