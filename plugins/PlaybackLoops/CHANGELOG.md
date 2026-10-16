@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.4
+
+- Keyframes: for MP4/MOV files Stash streams directly, the loop line shows the keyframes as small amber triangles. The plugin reads them from the file's index with a few small Range requests; other streams simply don't show them.
+- Hold Shift while setting or dragging the start mark to snap it to the nearest keyframe. A loop that starts on a keyframe jumps back in about 6 ms instead of decoding up to the start (80 ms to over a second, depending on resolution and keyframe spacing).
+- The end mark's frame is no longer shown before the jump back: the jump is made while the loop's last frame is on screen.
+- The guard that re-seeks when a loop jump ends up at the start of the video no longer undoes a seek to the start that you make yourself right after a jump.
+
 ## 0.1.3
 
 - The loop line now sits above the bars Stash draws for markers with an end time (such as cuts), instead of on top of them. A cut no longer looks like a loop region that stays after the marks are cleared.

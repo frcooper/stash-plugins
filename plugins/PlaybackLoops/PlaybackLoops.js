@@ -56,6 +56,257 @@
     if (p && p.catch) p.catch(() => {});
   }
 
+  // --- keyframe index -------------------------------------------------------
+
+  // A seek decodes from the keyframe before its target, so a loop that starts
+  // on a keyframe jumps back without a pause. For a direct MP4/MOV stream the
+  // keyframe times are read from the video track's sample tables in the moov
+  // box, with a few small Range requests (the video itself isn't downloaded).
+  // Anything else (other containers, transcodes, servers without Range
+  // support, errors) has no index, quietly.
+
+  const TOP_BOXES = ["ftyp", "moov", "mdat", "free", "skip", "wide", "uuid", "pnot", "meta", "pdin", "junk"];
+  const MAX_MOOV = 64 * 1024 * 1024;
+
+  function fourcc(v, pos) {
+    return String.fromCharCode(v.getUint8(pos), v.getUint8(pos + 1), v.getUint8(pos + 2), v.getUint8(pos + 3));
+  }
+
+  function u64(v, pos) {
+    return v.getUint32(pos) * 2 ** 32 + v.getUint32(pos + 4);
+  }
+
+  async function fetchRange(url, start, end, signal) {
+    const ctrl = new AbortController();
+    const abort = () => ctrl.abort();
+    signal.addEventListener("abort", abort);
+    try {
+      const res = await fetch(url, { headers: { Range: "bytes=" + start + "-" + end }, signal: ctrl.signal });
+      if (res.status !== 206) {
+        // a server that ignores Range would send the whole video
+        ctrl.abort();
+        throw new Error("no range support (HTTP " + res.status + ")");
+      }
+      const total = /\/(\d+)\s*$/.exec(res.headers.get("Content-Range") || "");
+      return { view: new DataView(await res.arrayBuffer()), total: total ? +total[1] : Infinity };
+    } finally {
+      signal.removeEventListener("abort", abort);
+    }
+  }
+
+  // box header at pos: [type, header size, box size]
+  function boxHeader(v, pos, end) {
+    if (pos + 8 > v.byteLength) return null;
+    let size = v.getUint32(pos);
+    let header = 8;
+    if (size === 1) {
+      if (pos + 16 > v.byteLength) return null;
+      size = u64(v, pos + 8);
+      header = 16;
+    } else if (size === 0) {
+      size = end - pos;
+    }
+    return size < header ? null : [fourcc(v, pos + 4), header, size];
+  }
+
+  // the moov box's contents, walking the top-level boxes (moov often comes
+  // after mdat)
+  async function readMoov(url, signal) {
+    let pos = 0;
+    let total = Infinity;
+    for (let i = 0; i < 32 && pos + 8 <= total; i++) {
+      const r = await fetchRange(url, pos, pos + 15, signal);
+      total = Math.min(total, r.total);
+      const box = boxHeader(r.view, 0, total - pos);
+      if (!box || !TOP_BOXES.includes(box[0])) return null;
+      const [type, header, size] = box;
+      if (type === "moov") {
+        if (size > MAX_MOOV) return null;
+        return (await fetchRange(url, pos + header, pos + size - 1, signal)).view;
+      }
+      pos += size;
+    }
+    return null;
+  }
+
+  // calls fn(type, start, end) for the boxes in [start, end); fn returns
+  // true to stop
+  function eachBox(v, start, end, fn) {
+    for (let pos = start; pos + 8 <= end; ) {
+      const box = boxHeader(v, pos, end);
+      if (!box || pos + box[2] > end) return;
+      if (fn(box[0], pos + box[1], pos + box[2])) return;
+      pos += box[2];
+    }
+  }
+
+  function findBox(v, start, end, path) {
+    let range = [start, end];
+    for (const name of path.split("/")) {
+      let found = null;
+      eachBox(v, range[0], range[1], (type, s, e) => type === name && (found = [s, e]));
+      if (!found) return null;
+      range = found;
+    }
+    return range;
+  }
+
+  // timescale of an mvhd or mdhd box
+  function timescale(v, [s]) {
+    return v.getUint32(s + (v.getUint8(s) === 1 ? 20 : 12));
+  }
+
+  // Presentation times of the video track's sync samples, in seconds on the
+  // video element's timeline: decode time (stts) plus composition offset
+  // (ctts), shifted by the edit list. null without a usable sync sample table
+  // (no stss means every frame is a keyframe; fragmented files keep their
+  // samples outside moov).
+  function parseKeyframes(v) {
+    const end = v.byteLength;
+    const mvhd = findBox(v, 0, end, "mvhd");
+    let trak = null;
+    eachBox(v, 0, end, (type, s, e) => {
+      if (type !== "trak") return false;
+      const hdlr = findBox(v, s, e, "mdia/hdlr");
+      if (hdlr && fourcc(v, hdlr[0] + 8) === "vide") trak = [s, e];
+      return !!trak;
+    });
+    if (!mvhd || !trak) return null;
+    const mdhd = findBox(v, trak[0], trak[1], "mdia/mdhd");
+    const stbl = findBox(v, trak[0], trak[1], "mdia/minf/stbl");
+    if (!mdhd || !stbl) return null;
+    const scale = timescale(v, mdhd);
+    const stts = findBox(v, stbl[0], stbl[1], "stts");
+    const stss = findBox(v, stbl[0], stbl[1], "stss");
+    const ctts = findBox(v, stbl[0], stbl[1], "ctts");
+    if (!scale || !stts || !stss) return null;
+
+    // edit list: leading empty edits delay the track, the first real edit
+    // says where in the media presentation starts
+    let delay = 0;
+    let mediaStart = 0;
+    const elst = findBox(v, trak[0], trak[1], "edts/elst");
+    if (elst) {
+      const wide = v.getUint8(elst[0]) === 1;
+      const n = v.getUint32(elst[0] + 4);
+      const movieScale = timescale(v, mvhd) || 1;
+      for (let i = 0, p = elst[0] + 8; i < n && p + (wide ? 20 : 12) <= elst[1]; i++, p += wide ? 20 : 12) {
+        const dur = wide ? u64(v, p) : v.getUint32(p);
+        const media = wide ? v.getInt32(p + 8) * 2 ** 32 + v.getUint32(p + 12) : v.getInt32(p + 4);
+        if (media === -1) {
+          delay += dur / movieScale;
+        } else {
+          mediaStart = media;
+          break;
+        }
+      }
+    }
+
+    const syncCount = Math.min(v.getUint32(stss[0] + 4), (stss[1] - stss[0] - 8) / 4);
+    if (!syncCount) return null;
+    const sync = [];
+    for (let i = 0; i < syncCount; i++) sync.push(v.getUint32(stss[0] + 8 + i * 4));
+
+    // walk samples in decode order up to the last sync sample
+    const runs = (box) => {
+      const n = box ? Math.min(v.getUint32(box[0] + 4), (box[1] - box[0] - 8) / 8) : 0;
+      return { box, n, i: 0, left: n ? v.getUint32(box[0] + 8) : 0 };
+    };
+    const next = (r, signed) => {
+      while (r.left === 0 && r.i + 1 < r.n) r.left = v.getUint32(r.box[0] + 8 + ++r.i * 8);
+      if (r.left === 0) return null;
+      r.left--;
+      const p = r.box[0] + 12 + r.i * 8;
+      return signed ? v.getInt32(p) : v.getUint32(p);
+    };
+    const durations = runs(stts);
+    const offsets = runs(ctts);
+    const times = [];
+    let dts = 0;
+    let k = 0;
+    for (let sample = 1; k < sync.length; sample++) {
+      const d = next(durations, false);
+      if (d === null) break;
+      const cto = ctts ? next(offsets, true) || 0 : 0;
+      if (sample === sync[k]) {
+        const t = (dts + cto - mediaStart) / scale + delay;
+        if (t >= 0) times.push(t);
+        k++;
+      }
+      dts += d;
+    }
+    times.sort((a, b) => a - b);
+    return times.length ? times : null;
+  }
+
+  // Stash's transcodes are /scene/<id>/stream.<ext> (and may be offset);
+  // its direct stream is /scene/<id>/stream
+  function canIndex(player) {
+    const src = player.currentSrc();
+    const type = (player.currentType() || "").toLowerCase();
+    if (!src || /mpegurl|dash/.test(type)) return false;
+    try {
+      const url = new URL(src, location.href);
+      return /^https?:$/.test(url.protocol) && !/\/stream\.\w+$/.test(url.pathname) && !/\.(m3u8|mpd)$/.test(url.pathname);
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function loadKeyframes(player) {
+    const s = player.playbackLoops_;
+    const src = player.currentSrc();
+    if (s.keyframesSrc === src) return;
+    if (s.keyframesAbort) s.keyframesAbort.abort();
+    s.keyframesSrc = src;
+    s.keyframes = null;
+    s.keyframesAbort = null;
+    drawKeyframes(player);
+    if (!canIndex(player)) return;
+
+    const ctrl = new AbortController();
+    s.keyframesAbort = ctrl;
+    readMoov(src, ctrl.signal)
+      .then((moov) => {
+        const times = moov && parseKeyframes(moov);
+        if (ctrl.signal.aborted) return;
+        s.keyframes = times;
+        console.debug("[PlaybackLoops] keyframes", times ? times.length : "none");
+        drawKeyframes(player);
+      })
+      .catch((e) => {
+        if (!ctrl.signal.aborted) console.debug("[PlaybackLoops] no keyframe index:", e.message || e);
+      })
+      .finally(() => {
+        if (s.keyframesAbort === ctrl) s.keyframesAbort = null;
+      });
+  }
+
+  // the keyframe nearest to t inside [lo, hi], or null
+  function nearestKeyframe(player, t, lo, hi) {
+    const keys = player.playbackLoops_.keyframes;
+    if (!keys) return null;
+    let a = 0;
+    let b = keys.length;
+    while (a < b) {
+      const m = (a + b) >> 1;
+      if (keys[m] < t) a = m + 1;
+      else b = m;
+    }
+    let best = null;
+    [a - 1, a, a - 2, a + 1].forEach((i) => {
+      const k = keys[i];
+      if (k == null || k < lo || k > hi) return;
+      if (best === null || Math.abs(k - t) < Math.abs(best - t)) best = k;
+    });
+    return best;
+  }
+
+  function isKeyframe(player, t) {
+    const k = nearestKeyframe(player, t, -Infinity, Infinity);
+    return k !== null && Math.abs(k - t) < 0.5 / fps();
+  }
+
   // --- loop state -----------------------------------------------------------
 
   // Marks sit on frame boundaries. The loop plays frames [start, end): the end
@@ -82,9 +333,10 @@
     return Math.min(Math.max(Math.round(t * f) / f, 0), duration(player));
   }
 
-  function addMark(player, t) {
+  // exact: t is a keyframe time, keep it off the frame grid
+  function addMark(player, t, exact) {
     const s = player.playbackLoops_;
-    t = snap(player, t);
+    if (!exact) t = snap(player, t);
     const f = fps();
     const same = s.marks.find((m) => Math.abs(m.t - t) < 0.5 / f);
     if (same) return same;
@@ -141,17 +393,20 @@
   }
 
   // If something else sends playback to the start of the video right after a
-  // loop seek, seek again once and say so in the console.
+  // loop seek, seek again once and say so in the console. Only a landing under
+  // 0.5 s for a target past 1 s counts, and any input from the user (who may
+  // well be seeking to the start) disarms it, so a good jump is never seeked
+  // twice.
   function checkLoopSeek(player) {
     const s = player.playbackLoops_;
     const target = s.loopSeek;
     if (!target) return;
-    if (performance.now() > target.until) {
+    if (performance.now() > target.until || target.t < 1) {
       s.loopSeek = null;
       return;
     }
     const now = player.currentTime();
-    if (now >= 0.5 || target.t < 1) return;
+    if (now >= 0.5) return;
     console.warn("[PlaybackLoops] loop seek to " + target.t.toFixed(3) + "s landed at " + now.toFixed(3) + "s");
     if (target.retried) {
       s.loopSeek = null;
@@ -191,16 +446,22 @@
     }
   }
 
-  // Called every frame (and on timeupdate). The loop only fires when playback
-  // runs from inside the loop across its end, so seeking outside the loop and
-  // playing on works like it does without one.
-  function check(player) {
+  // Called for every frame shown, with its time (from the
+  // requestVideoFrameCallback metadata), and on timeupdate. The loop only fires
+  // when playback runs from inside the loop across its end, so seeking outside
+  // the loop and playing on works like it does without one.
+  // With frame times the jump is made while the loop's last frame is on screen,
+  // as soon as the next frame would be the end mark's, so that frame (not part
+  // of the loop) is never shown. timeupdate only catches a crossing that
+  // already happened, for when frame callbacks aren't available.
+  function check(player, frameTime) {
     const s = player.playbackLoops_;
     if (player.seeking()) {
       s.last = null;
       return;
     }
-    const t = player.currentTime();
+    const byFrame = frameTime != null;
+    const t = byFrame ? frameTime : player.currentTime();
     const last = s.last;
     s.last = t;
     if (s.drag || !looping(s) || last == null) return;
@@ -208,7 +469,8 @@
     const f = fps();
     const [a, b] = times(s);
     const edge = b - 0.5 / f;
-    if (last >= a - 1 / f && last < edge && t >= edge && t - last < 2) {
+    const next = byFrame && !player.paused() ? t + 1 / f : t;
+    if (last >= a - 1 / f && last < edge && next >= edge && t - last < 2) {
       endOfLoop(player);
     }
   }
@@ -483,6 +745,7 @@
 
     s.track.classList.add("has-layout");
     drawTicks(player);
+    drawKeyframes(player);
   }
 
   // second and minute steps for the graduations
@@ -490,18 +753,10 @@
 
   function drawTicks(player) {
     const s = player.playbackLoops_;
-    const canvas = s.ticks;
-    const dpr = window.devicePixelRatio || 1;
-    const w = Math.round(canvas.clientWidth * dpr);
-    const h = Math.round(canvas.clientHeight * dpr);
-    if (canvas.width !== w) canvas.width = w;
-    if (canvas.height !== h) canvas.height = h;
-    const ctx = canvas.getContext("2d");
-    ctx.clearRect(0, 0, w, h);
-
+    const { ctx, w, h, dpr } = sizeCanvas(s.ticks);
     const d = duration(player);
     if (!d || !w) return;
-    const pxPerSec = canvas.clientWidth / d;
+    const pxPerSec = s.ticks.clientWidth / d;
     const minor = STEPS.find((step) => step * pxPerSec >= 6) || STEPS[STEPS.length - 1];
     const major =
       STEPS.find((step) => step % minor === 0 && step >= minor * 4) || minor * 5;
@@ -515,6 +770,41 @@
       const th = t % major === 0 ? h : minorH;
       ctx.fillRect(x, h - th, tickW, th);
     }
+  }
+
+  function sizeCanvas(canvas) {
+    const dpr = window.devicePixelRatio || 1;
+    const w = Math.round(canvas.clientWidth * dpr);
+    const h = Math.round(canvas.clientHeight * dpr);
+    if (canvas.width !== w) canvas.width = w;
+    if (canvas.height !== h) canvas.height = h;
+    const ctx = canvas.getContext("2d");
+    ctx.clearRect(0, 0, w, h);
+    return { ctx, w, h, dpr };
+  }
+
+  // keyframes: small triangles in their own colour pointing down at the line,
+  // left out where they're too close to tell apart
+  function drawKeyframes(player) {
+    const s = player.playbackLoops_;
+    const keys = s.keyframes;
+    s.track.classList.toggle("has-keyframes", !!keys);
+    const { ctx, w, h } = sizeCanvas(s.keys);
+    const d = duration(player);
+    if (!keys || !d || !w) return;
+    const half = h * 0.6;
+    ctx.fillStyle = getComputedStyle(s.keys).color;
+    let lastX = -Infinity;
+    keys.forEach((t) => {
+      const x = (t / d) * w;
+      if (x - lastX < 2.5 * half) return;
+      ctx.beginPath();
+      ctx.moveTo(x - half, 0);
+      ctx.lineTo(x + half, 0);
+      ctx.lineTo(x, h);
+      ctx.fill();
+      lastX = x;
+    });
   }
 
   function percent(player, t) {
@@ -538,7 +828,7 @@
       m.el.classList.toggle("is-selected", m === s.selected);
       m.el.classList.toggle("is-removing", m.removing);
       m.el.title =
-        formatTime(m.t) + " · F " + frameOf(m.t) + " — drag to move, drag off or right-click to remove";
+        label(player, m.t) + " — drag to move (Shift snaps the start to a keyframe), drag off or right-click to remove";
     });
 
     const two = s.marks.length === 2;
@@ -577,11 +867,15 @@
     render(player);
   }
 
+  function label(player, t) {
+    return formatTime(t) + " · F " + frameOf(t) + (isKeyframe(player, t) ? " · keyframe" : "");
+  }
+
   function showTip(player, clientX, t) {
     const s = player.playbackLoops_;
     const r = s.track.getBoundingClientRect();
     s.tip.style.left = Math.min(Math.max(clientX - r.left, 0), r.width) + "px";
-    s.tip.textContent = formatTime(t) + " · F " + frameOf(t);
+    s.tip.textContent = label(player, t);
     s.tip.classList.add("is-shown");
   }
 
@@ -593,6 +887,20 @@
     return snap(player, p * duration(player));
   }
 
+  // Shift snaps the start mark (or a lone mark, which may become the start) to
+  // the nearest keyframe; mark is null for a mark about to be placed.
+  function snapToKeyframe(player, mark, t) {
+    const s = player.playbackLoops_;
+    let hi = duration(player);
+    const other = s.marks.find((m) => m !== mark);
+    if (s.marks.length === 2 || (!mark && other)) {
+      if (s.marks.length === 2 ? mark !== s.marks[0] : t >= other.t) return t;
+      hi = s.marks[s.marks.length - 1].t - 1 / fps();
+    }
+    const k = nearestKeyframe(player, t, 0, hi);
+    return k === null ? t : k;
+  }
+
   // While paused, dragging a mark shows the frame it lands on: the first frame
   // of the loop for the start mark, the last one for the end mark.
   function previewMark(player, mark) {
@@ -601,6 +909,12 @@
     const end = s.marks.length === 2 && s.marks[1] === mark;
     const t = end ? mark.t - 0.5 / f : mark.t + 0.5 / f;
     player.currentTime(Math.min(Math.max(t, 0), duration(player)));
+  }
+
+  function moveMark(player, mark, t) {
+    if (t === mark.t) return;
+    mark.t = t;
+    if (player.paused() && !mark.removing) previewMark(player, mark);
   }
 
   function bindPointer(player) {
@@ -619,8 +933,12 @@
           select(player, null);
           return;
         }
-        mark = addMark(player, timeAt(player, e.clientX));
+        const t = timeAt(player, e.clientX);
+        mark = addMark(player, e.shiftKey ? snapToKeyframe(player, null, t) : t, e.shiftKey);
         if (!mark) return;
+      } else if (e.shiftKey) {
+        moveMark(player, mark, snapToKeyframe(player, mark, mark.t));
+        update(player);
       }
       select(player, mark);
       s.drag = { mark, pointerId: e.pointerId };
@@ -631,17 +949,17 @@
     track.addEventListener("pointermove", (e) => {
       const drag = s.drag;
       if (!drag || drag.pointerId !== e.pointerId) {
-        if (duration(player)) showTip(player, e.clientX, timeAt(player, e.clientX));
+        if (!duration(player)) return;
+        const t = timeAt(player, e.clientX);
+        showTip(player, e.clientX, e.shiftKey ? snapToKeyframe(player, null, t) : t);
         return;
       }
       const mark = drag.mark;
       const r = s.line.getBoundingClientRect();
       mark.removing = Math.abs(e.clientY - (r.top + r.height / 2)) > REMOVE_DISTANCE;
-      const t = clampMark(player, mark, timeAt(player, e.clientX));
-      if (t !== mark.t) {
-        mark.t = t;
-        if (player.paused() && !mark.removing) previewMark(player, mark);
-      }
+      let t = clampMark(player, mark, timeAt(player, e.clientX));
+      if (e.shiftKey) t = snapToKeyframe(player, mark, t);
+      moveMark(player, mark, t);
       render(player);
       showTip(player, e.clientX, mark.t);
     });
@@ -728,9 +1046,12 @@
     s.video = video;
     if (typeof video.requestVideoFrameCallback !== "function") return;
 
-    const onFrame = () => {
+    const onFrame = (now, meta) => {
       if (s.video !== video) return;
-      check(player);
+      // mediaTime is the shown frame's own time; Stash's offset streams put
+      // the player's timeline ahead of the element's
+      const t = meta && meta.mediaTime;
+      check(player, t != null ? t + player.currentTime() - video.currentTime : null);
       video.requestVideoFrameCallback(onFrame);
     };
     video.requestVideoFrameCallback(onFrame);
@@ -742,7 +1063,8 @@
     const track = document.createElement("div");
     track.className = "pbl-track";
     track.innerHTML =
-      '<div class="pbl-line"><div class="pbl-region"></div><canvas class="pbl-ticks"></canvas></div>' +
+      '<div class="pbl-line"><div class="pbl-region"></div><canvas class="pbl-ticks"></canvas>' +
+      '<canvas class="pbl-keys"></canvas></div>' +
       '<div class="pbl-tip"></div>';
     const toastEl = document.createElement("div");
     toastEl.className = "pbl-toast";
@@ -766,6 +1088,10 @@
       line: track.querySelector(".pbl-line"),
       region: track.querySelector(".pbl-region"),
       ticks: track.querySelector(".pbl-ticks"),
+      keys: track.querySelector(".pbl-keys"),
+      keyframes: null, // sorted keyframe times, when the stream has an index
+      keyframesSrc: null,
+      keyframesAbort: null,
       tip: track.querySelector(".pbl-tip"),
       toast: toastEl,
       toastTimer: null,
@@ -820,6 +1146,7 @@
       trackFrames(player);
     });
     player.on(["loadedmetadata", "durationchange"], () => {
+      loadKeyframes(player);
       layout(player);
       render(player);
     });
@@ -835,12 +1162,18 @@
       if (Math.abs(player.currentTime() - lastFrameTime(s)) < 1 / fps()) seekStart(player);
     });
     player.on(["fullscreenchange", "playerresize"], relayout);
+    // the user may well be seeking to the start themselves
+    const disarm = () => (s.loopSeek = null);
+    player.el().addEventListener("pointerdown", disarm, true);
+    player.el().addEventListener("keydown", disarm, true);
     player.on("dispose", () => {
       ro.disconnect();
       mo.disconnect();
+      if (s.keyframesAbort) s.keyframesAbort.abort();
       s.video = null;
     });
 
+    if (player.readyState() > 0) loadKeyframes(player);
     layout(player);
     update(player);
   }
