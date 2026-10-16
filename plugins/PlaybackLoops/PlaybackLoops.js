@@ -141,6 +141,12 @@
   function endOfLoop(player) {
     const s = player.playbackLoops_;
     s.last = null;
+    console.debug("[PlaybackLoops] end of loop", {
+      mode: s.mode,
+      at: player.currentTime(),
+      marks: times(s),
+      to: s.mode === "once" ? lastFrameTime(s) : startTime(s),
+    });
     if (player.ended()) {
       // caught on the video's last timeupdate: its `ended` event is already
       // queued and must not reach video.js (which pauses) or Stash (which moves
@@ -179,32 +185,30 @@
     }
   }
 
-  function toggleForever(player) {
+  // Loop once / loop forever: pressing the active one switches looping off.
+  // Switching a mode on keeps the playhead where it is if it's inside the loop
+  // (so flipping between the two doesn't restart the loop), otherwise it goes
+  // to the start of the loop; either way playback starts.
+  function setMode(player, mode) {
     const s = player.playbackLoops_;
     if (s.marks.length < 2) return;
-    if (s.mode === "forever") {
+    if (s.mode === mode) {
       s.mode = "off";
     } else {
-      s.mode = "forever";
-      const [a, b] = times(s);
+      s.mode = mode;
       const t = player.currentTime();
-      if (t < a || t >= b - 0.5 / fps()) seekStart(player);
+      if (t < s.marks[0].t || t >= lastFrameTime(s) + 0.25 / fps()) seekStart(player);
       if (player.paused()) play(player);
     }
     update(player);
   }
 
+  function toggleForever(player) {
+    setMode(player, "forever");
+  }
+
   function loopOnce(player) {
-    const s = player.playbackLoops_;
-    if (s.marks.length < 2) return;
-    if (s.mode === "once" && !player.paused()) {
-      s.mode = "off";
-    } else {
-      s.mode = "once";
-      seekStart(player);
-      play(player);
-    }
-    update(player);
+    setMode(player, "once");
   }
 
   // l: mark the current time, a third press clears both marks (as Stash's own
@@ -315,12 +319,35 @@
             tag_ids: tagIds.filter((id) => id !== tagId),
           },
         },
+        // what Stash's own marker create does (useSceneMarkerCreate): drop the
+        // cached marker data so the markers pane, the seek bar and the marker
+        // lists refetch
+        update(cache) {
+          cache.evict({
+            id: cache.identify({ __typename: "Scene", id: s.sceneId }),
+            fieldName: "scene_markers",
+          });
+          [tagId].concat(tagIds).forEach((id) =>
+            cache.evict({
+              id: cache.identify({ __typename: "Tag", id }),
+              fieldName: "scene_marker_count",
+            })
+          );
+          const DROP = (_value, { DELETE }) => DELETE;
+          cache.modify({
+            fields: {
+              findScenes: DROP,
+              findSceneMarkers: DROP,
+              markerStrings: DROP,
+              sceneMarkerTags: DROP,
+              findStudios: DROP,
+              findTags: DROP,
+            },
+          });
+          cache.gc();
+        },
       });
       toast(player, "Cut saved: " + title);
-      // show the new marker in the scene's marker list and on the seek bar
-      getClient()
-        .refetchQueries({ include: ["FindScene"] })
-        .catch(() => {});
     } catch (e) {
       console.error("[PlaybackLoops] cut failed", e);
       cutTagId = null;
@@ -730,8 +757,9 @@
     });
     player.on("timeupdate", () => check(player));
     player.on("play", () => {
-      // loop once: pressing play at the end of the loop plays it again
-      if (s.mode !== "once" || s.marks.length < 2) return;
+      // playing from the loop's last frame (where loop once stops) starts the
+      // loop again rather than running on past the end mark
+      if (!looping(s)) return;
       if (Math.abs(player.currentTime() - lastFrameTime(s)) < 1 / fps()) seekStart(player);
     });
     player.on(["fullscreenchange", "playerresize"], relayout);

@@ -15,8 +15,8 @@ The control bar gets three buttons:
 
 | Button | Effect |
 |---|---|
-| Loop once | Plays the loop from the start mark and pauses at the end mark. Press play there to go again. |
-| Loop forever | Loops until you switch it off (press it again). Setting the second mark turns this on. |
+| Loop once | Plays to the end mark and pauses there; press play to go again. Starts from the start mark if the playhead is outside the loop. Press it again to switch looping off. |
+| Loop forever | Loops until you press it again. Starts from the start mark if the playhead is outside the loop. Setting the second mark turns this on. |
 | Cut loop | Saves the loop as a scene marker (see below). |
 
 Keys: **l** sets a mark at the current time (a third press clears both marks), **Shift+L** toggles loop forever.
