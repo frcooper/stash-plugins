@@ -452,8 +452,19 @@
     const thick = s.thickness;
     const gap = Math.min(1.5 * thick, MAX_GAP);
     const br = bar.getBoundingClientRect();
-    const lineTop = hr.top + hr.height / 2 - thick / 2 - gap - thick - br.top;
+    let lineTop = hr.top + hr.height / 2 - thick / 2 - gap - thick - br.top;
     const padBottom = gap / 2;
+
+    // Stash draws markers that have an end time (cuts among them) as bars
+    // stacked above the seek bar; keep the loop line above them, or they look
+    // like a loop region
+    player
+      .el()
+      .querySelectorAll(".vjs-marker-range")
+      .forEach((range) => {
+        const rr = range.getBoundingClientRect();
+        if (rr.width && rr.height) lineTop = Math.min(lineTop, rr.top - br.top - padBottom - thick);
+      });
 
     const style = s.track.style;
     style.left = hr.left - br.left + "px";
@@ -793,6 +804,10 @@
     ro.observe(player.el());
     const holder = bar && bar.querySelector(".vjs-progress-holder");
     if (holder) ro.observe(holder);
+    // marker ranges come and go as the scene's markers load or change
+    const mo = new MutationObserver(relayout);
+    const progress = bar && bar.querySelector(".vjs-progress-control");
+    if (progress) mo.observe(progress, { childList: true });
 
     trackFrames(player);
     player.on("loadstart", () => {
@@ -822,6 +837,7 @@
     player.on(["fullscreenchange", "playerresize"], relayout);
     player.on("dispose", () => {
       ro.disconnect();
+      mo.disconnect();
       s.video = null;
     });
 

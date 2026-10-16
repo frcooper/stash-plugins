@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.3
+
+- The loop line now sits above the bars Stash draws for markers with an end time (such as cuts), instead of on top of them. A cut no longer looks like a loop region that stays after the marks are cleared.
+
 ## 0.1.2
 
 - Pressing the loop once or loop forever button that's already on does nothing.
