@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.5
+
+- The loop line no longer moves when the seek bar thickens and thins as it is hovered or focused; it is placed from the bar at rest.
+
 ## 0.1.4
 
 - Keyframes: for MP4/MOV files Stash streams directly, the loop line shows the keyframes as small amber triangles. The plugin reads them from the file's index with a few small Range requests; other streams simply don't show them.

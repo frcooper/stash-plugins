@@ -706,32 +706,35 @@
       return;
     }
 
-    // video.js thickens the seek bar on hover; measure it at rest
-    const control = holder.closest(".vjs-progress-control");
-    if (!s.thickness || !(control && control.matches(":hover"))) {
-      s.thickness = hr.height;
-    }
+    // video.js thickens the seek bar (with a transition) while it is hovered or
+    // focused, and the bar and the marker ranges above it move as it does.
+    // Its thinnest is its rest state; place the line vertically only then, so
+    // it stays put while the bar grows and shrinks.
+    if (!s.thickness || hr.height < s.thickness) s.thickness = hr.height;
     const thick = s.thickness;
     const gap = Math.min(1.5 * thick, MAX_GAP);
-    const br = bar.getBoundingClientRect();
-    let lineTop = hr.top + hr.height / 2 - thick / 2 - gap - thick - br.top;
     const padBottom = gap / 2;
+    const br = bar.getBoundingClientRect();
+    if (s.lineTop == null || hr.height <= thick + 0.5) {
+      let lineTop = hr.top + hr.height / 2 - thick / 2 - gap - thick - br.top;
 
-    // Stash draws markers that have an end time (cuts among them) as bars
-    // stacked above the seek bar; keep the loop line above them, or they look
-    // like a loop region
-    player
-      .el()
-      .querySelectorAll(".vjs-marker-range")
-      .forEach((range) => {
-        const rr = range.getBoundingClientRect();
-        if (rr.width && rr.height) lineTop = Math.min(lineTop, rr.top - br.top - padBottom - thick);
-      });
+      // Stash draws markers that have an end time (cuts among them) as bars
+      // stacked above the seek bar; keep the loop line above them, or they
+      // look like a loop region
+      player
+        .el()
+        .querySelectorAll(".vjs-marker-range")
+        .forEach((range) => {
+          const rr = range.getBoundingClientRect();
+          if (rr.width && rr.height) lineTop = Math.min(lineTop, rr.top - br.top - padBottom - thick);
+        });
+      s.lineTop = lineTop;
+    }
 
     const style = s.track.style;
     style.left = hr.left - br.left + "px";
     style.width = hr.width + "px";
-    style.top = lineTop - MARK_HEAD + "px";
+    style.top = s.lineTop - MARK_HEAD + "px";
     style.height = MARK_HEAD + thick + padBottom + "px";
     style.setProperty("--pbl-thick", thick + "px");
     style.setProperty("--pbl-head", MARK_HEAD + "px");
@@ -1080,7 +1083,8 @@
       drag: null,
       cutting: false,
       swallowEnded: false,
-      thickness: 0,
+      thickness: 0, // the seek bar's at rest; 0 to measure it afresh
+      lineTop: null, // px from the control bar's top, set at rest
       video: null,
       stashLoop: !!nativeLoop(),
       nativeLoop,
@@ -1126,7 +1130,19 @@
     bindPointer(player);
 
     const relayout = () => layout(player);
-    const ro = new ResizeObserver(relayout);
+    let playerSize = "";
+    const ro = new ResizeObserver(() => {
+      // the seek bar's rest thickness can change with the player's size
+      // (fullscreen, for one): measure it again
+      const pr = player.el().getBoundingClientRect();
+      const size = pr.width + "x" + pr.height;
+      if (size !== playerSize) {
+        playerSize = size;
+        s.thickness = 0;
+        s.lineTop = null;
+      }
+      relayout();
+    });
     ro.observe(player.el());
     const holder = bar && bar.querySelector(".vjs-progress-holder");
     if (holder) ro.observe(holder);
