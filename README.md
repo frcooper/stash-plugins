@@ -6,7 +6,6 @@ Plugins for [Stash](https://github.com/stashapp/stash), published as a plugin so
 |---|---|
 | [Frame Step](plugins/FrameStep) | Frame-by-frame stepping in the scene player. |
 | [Playback Loops](plugins/PlaybackLoops) | Loop between two marks on a line above the seek bar, play loops once or forever, and cut them to `{CUT}` markers. Replaces Stash's own loop controls. |
-| [Reencode](plugins/Reencode) | Re-encode a scene's file with ffmpeg and swap it in, keeping the original hidden under an `{ORIGINAL}` tag. |
 
 ## Install
 
