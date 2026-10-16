@@ -28,6 +28,17 @@
   top: var(--pbl-head);
 }
 
+/* keyframes: amber ticks standing on the line, above the graduations */
+.video-js .pbl-keys {
+  bottom: 100%;
+  color: #ffb52e;
+  height: 5px;
+  left: 0;
+  pointer-events: none;
+  position: absolute;
+  width: 100%;
+}
+
 /* graduations; white drawn with difference shows on both the line and the
    loop region */
 .video-js .pbl-ticks {
