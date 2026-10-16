@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.2
+
+- Pressing the loop once or loop forever button that's already on does nothing.
+- New clear loop button: removes both marks and plays on normally from where the video is.
+- Cut loop does nothing (beyond a short notice) when the scene already has a marker over the same frames.
+- Shift+L switches looping off and back on, keeping the marks.
+- If playback ends up at the start of the video right after a loop jump, the plugin seeks back to the loop once and logs a warning to the browser console.
+
 ## 0.1.1
 
 - Switching between loop once and loop forever no longer jumps back to the start of the loop when the playhead is already inside it. Pressing the active loop button switches looping off.

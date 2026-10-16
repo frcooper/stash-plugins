@@ -15,11 +15,14 @@ The control bar gets three buttons:
 
 | Button | Effect |
 |---|---|
-| Loop once | Plays to the end mark and pauses there; press play to go again. Starts from the start mark if the playhead is outside the loop. Press it again to switch looping off. |
-| Loop forever | Loops until you press it again. Starts from the start mark if the playhead is outside the loop. Setting the second mark turns this on. |
+| Loop once | Plays to the end mark and pauses there; press play to go again. |
+| Loop forever | Loops until you switch it off. Setting the second mark turns this on. |
 | Cut loop | Saves the loop as a scene marker (see below). |
+| Clear loop | Removes both marks. Playback carries on normally from where it is. |
 
-Keys: **l** sets a mark at the current time (a third press clears both marks), **Shift+L** toggles loop forever.
+Switching to loop once or loop forever keeps the playhead where it is if it's inside the loop, and goes to the start mark if it isn't. Pressing the mode that's already on does nothing.
+
+Keys: **l** sets a mark at the current time (a third press clears both marks), **Shift+L** switches looping off and back on without removing the marks.
 
 ### Cut markers
 
@@ -29,6 +32,8 @@ Cut loop creates a marker on the scene with:
 - **Title:** the start and end as frame numbers, e.g. `F1200-F1530`.
 - **Primary tag:** `{CUT}`, created if it doesn't exist yet.
 - **Tags:** the scene's own tags.
+
+If the scene already has a marker over the same frames, cut does nothing.
 
 The end mark is the frame the loop jumps back on, so it isn't played as part of the loop; the marker's end time is that same point.
 
@@ -43,7 +48,7 @@ Add this repository as a plugin source (see the [repository README](../../README
 This plugin takes over all of the player's looping:
 
 - Stash's A/B loop is switched off: the **l** key now sets loop marks, and the A/B loop buttons (**Settings → Interface → Show A/B loop controls**) are hidden.
-- **Shift+L** toggles this plugin's loop instead of video.js's whole-video loop.
+- **Shift+L** switches this plugin's loop off and on instead of toggling video.js's whole-video loop.
 - Stash's automatic looping of short videos (**Maximum loop duration**) still applies while no marked loop is running, and is suspended while one is.
 - When the end mark is at the very end of the video, reaching the end loops instead of moving on to the next scene in the queue.
 
