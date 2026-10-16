@@ -10,6 +10,7 @@ When the player's controls are showing, a second line sits above the seek bar: t
 - **Drag a mark** sideways to move it. It stops one frame short of the other mark. While the video is paused, dragging shows the frame the mark lands on.
 - **Hold Shift** while setting or dragging the start mark (or a lone mark) to snap it to the nearest keyframe. A loop that starts on a keyframe jumps back without a pause (see Limitations). Shift-clicking a start mark snaps it where it is. The end mark always stays frame-accurate. A mark on a keyframe says so in its tooltip.
 - **Remove a mark** by dragging it off the line (up or down) and letting go, by right-clicking it, or by clicking it and pressing **Delete** or **Backspace**. **Esc** drops the selection.
+- **Click a marker bar** to loop that marker. Stash draws markers that have an end time (cuts among them) as bars; this plugin moves them below the seek bar. Clicking one replaces the marks with the marker's start and end and plays the loop from its start, in the loop mode that's on (loop forever if neither is).
 - Play, pause, seeking and the other player controls work as usual during a loop. The loop only jumps back when playback runs from inside the loop over its end mark, so you can seek out of the loop and keep watching.
 
 The control bar gets three buttons:
