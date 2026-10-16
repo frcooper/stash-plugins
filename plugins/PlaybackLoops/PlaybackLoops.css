@@ -4,6 +4,18 @@
   display: none !important;
 }
 
+/* Stash's bars for markers with an end time, moved from above the seek bar to
+   below it (top and height set from script); click one to loop it */
+.video-js .pbl-ranges-below .vjs-marker-range {
+  bottom: auto !important;
+  cursor: pointer;
+  transform: none;
+}
+
+.video-js .pbl-ranges-below .vjs-marker-range:hover {
+  filter: brightness(1.3);
+}
+
 /* loop line: sits above the seek bar, positioned and coloured from script.
    The track is the hit area; the line inside it is the visible bar. */
 .video-js .pbl-track {

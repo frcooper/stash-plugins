@@ -7,6 +7,8 @@
   const MAX_GAP = 32; // px between the loop line and the seek bar, at most
   const MARK_HEAD = 12; // px a mark sticks up above the loop line
   const REMOVE_DISTANCE = 40; // px a mark has to be dragged off the line to delete it
+  const RANGE_LAYER = 9; // px between layers of Stash's marker ranges (markers.ts)
+  const RANGE_MIN = 3; // px a marker range is squeezed to, at least
 
   const api = window.PluginApi;
   const { gql } = api.libraries.Apollo;
@@ -497,6 +499,25 @@
     setMode(player, "once");
   }
 
+  // Replace the marks with a loop over [a, b) and play it from its start, in
+  // the mode that's on (loop forever if none is). A start on a keyframe (a
+  // Shift-snapped cut) stays on it.
+  function loopRange(player, a, b) {
+    const s = player.playbackLoops_;
+    const f = fps();
+    if (!duration(player) || !(b > a)) return;
+    const mode = s.mode === "off" ? "forever" : s.mode;
+    clearMarks(player);
+    const k = nearestKeyframe(player, a, a - 0.5 / f, a + 0.5 / f);
+    const start = addMark(player, k === null ? a : k, k !== null);
+    addMark(player, Math.max(b, start.t + 1 / f));
+    if (s.marks.length < 2) return;
+    s.mode = mode;
+    seekStart(player);
+    if (player.paused()) play(player);
+    update(player);
+  }
+
   // Shift+L: switch looping off and back on without losing the marks
   function toggleLooping(player) {
     const s = player.playbackLoops_;
@@ -715,20 +736,15 @@
     const gap = Math.min(1.5 * thick, MAX_GAP);
     const padBottom = gap / 2;
     const br = bar.getBoundingClientRect();
+    const pr = s.progress && s.progress.getBoundingClientRect();
     if (s.lineTop == null || hr.height <= thick + 0.5) {
-      let lineTop = hr.top + hr.height / 2 - thick / 2 - gap - thick - br.top;
-
-      // Stash draws markers that have an end time (cuts among them) as bars
-      // stacked above the seek bar; keep the loop line above them, or they
-      // look like a loop region
-      player
-        .el()
-        .querySelectorAll(".vjs-marker-range")
-        .forEach((range) => {
-          const rr = range.getBoundingClientRect();
-          if (rr.width && rr.height) lineTop = Math.min(lineTop, rr.top - br.top - padBottom - thick);
-        });
-      s.lineTop = lineTop;
+      const middle = hr.top + hr.height / 2;
+      s.lineTop = middle - thick / 2 - gap - thick - br.top;
+      // the marker ranges go below the bar, clear of it at its thickest
+      if (pr) {
+        s.rangeTop = middle + thick / 2 + thick - pr.top;
+        s.rangeBottom = pr.height - 1;
+      }
     }
 
     const style = s.track.style;
@@ -747,8 +763,29 @@
     style.setProperty("--pbl-fg-raw", playColor || "rgb(255, 255, 255)");
 
     s.track.classList.add("has-layout");
+    placeRanges(player);
     drawTicks(player);
     drawKeyframes(player);
+  }
+
+  // Stash draws markers that have an end time (cuts among them) as bars
+  // stacked in layers above the seek bar, where the loop line goes. Move them
+  // below the bar, the first layer nearest it, squeezed to fit above the
+  // buttons. Stash sets each bar's layer as its `bottom`; the CSS overrides
+  // that, and the layer is read back from it here.
+  function placeRanges(player) {
+    const s = player.playbackLoops_;
+    if (!s.progress || s.rangeTop == null) return;
+    const ranges = Array.from(s.progress.querySelectorAll(".vjs-marker-range"));
+    s.progress.classList.add("pbl-ranges-below");
+    if (!ranges.length) return;
+    const layerOf = (el) => Math.max(0, Math.round((parseFloat(el.style.bottom) || 0) / RANGE_LAYER));
+    const layers = Math.max(...ranges.map(layerOf)) + 1;
+    const pitch = Math.max(Math.min(RANGE_LAYER, (s.rangeBottom - s.rangeTop) / layers), RANGE_MIN + 1);
+    ranges.forEach((el) => {
+      el.style.top = s.rangeTop + layerOf(el) * pitch + "px";
+      el.style.height = pitch - 1 + "px";
+    });
   }
 
   // second and minute steps for the graduations
@@ -995,6 +1032,57 @@
     });
   }
 
+  // The start and end of the marker a range bar is drawn for. Stash's markers
+  // plugin keeps its markers and their bars in matching lists; failing that,
+  // they're read off where the bar is drawn.
+  function rangeTimes(player, el) {
+    try {
+      const plugin = player.usingPlugin("markers") && player.markers();
+      const i = plugin.markerDivs.findIndex((set) => set.range === el);
+      const m = plugin.markers[i];
+      if (m && m.end_seconds != null) return [m.seconds, m.end_seconds];
+    } catch (e) {
+      // a markers plugin that doesn't look like Stash's
+    }
+    const holder = player.el().querySelector(".vjs-progress-holder");
+    const hr = holder && holder.getBoundingClientRect();
+    const rr = el.getBoundingClientRect();
+    const d = duration(player);
+    if (!hr || !hr.width || !d) return null;
+    const at = (x) => Math.min(Math.max((x - hr.left) / hr.width, 0), 1) * d;
+    return [at(rr.left), at(rr.right)];
+  }
+
+  // Clicking a marker range loops it, from its start, straight away. The
+  // progress control would otherwise seek to the point clicked.
+  function bindRanges(player, progress) {
+    const rangeAt = (e) => e.target instanceof Element && e.target.closest(".vjs-marker-range");
+    ["mousedown", "touchstart"].forEach((type) =>
+      progress.addEventListener(
+        type,
+        (e) => {
+          if (rangeAt(e)) e.stopPropagation();
+        },
+        true
+      )
+    );
+    progress.addEventListener(
+      "pointerdown",
+      (e) => {
+        const el = rangeAt(e);
+        if (!el) return;
+        e.stopPropagation();
+        if (e.button !== 0) return;
+        e.preventDefault();
+        const r = rangeTimes(player, el);
+        if (r) loopRange(player, r[0], r[1]);
+        // keep keyboard control (space etc.) with the player
+        player.el().focus();
+      },
+      true
+    );
+  }
+
   // --- setup ----------------------------------------------------------------
 
   const ICONS = {
@@ -1085,6 +1173,9 @@
       swallowEnded: false,
       thickness: 0, // the seek bar's at rest; 0 to measure it afresh
       lineTop: null, // px from the control bar's top, set at rest
+      rangeTop: null, // px from the progress control's top, set at rest
+      rangeBottom: null,
+      progress: null, // .vjs-progress-control, which holds the marker ranges
       video: null,
       stashLoop: !!nativeLoop(),
       nativeLoop,
@@ -1111,6 +1202,7 @@
     disableAbLoop(player);
 
     const bar = player.controlBar && player.controlBar.el();
+    s.progress = bar && bar.querySelector(".vjs-progress-control");
     if (bar) {
       bar.append(track);
 
@@ -1128,6 +1220,7 @@
     player.el().append(toastEl);
 
     bindPointer(player);
+    if (s.progress) bindRanges(player, s.progress);
 
     const relayout = () => layout(player);
     let playerSize = "";
@@ -1148,8 +1241,7 @@
     if (holder) ro.observe(holder);
     // marker ranges come and go as the scene's markers load or change
     const mo = new MutationObserver(relayout);
-    const progress = bar && bar.querySelector(".vjs-progress-control");
-    if (progress) mo.observe(progress, { childList: true });
+    if (s.progress) mo.observe(s.progress, { childList: true });
 
     trackFrames(player);
     player.on("loadstart", () => {

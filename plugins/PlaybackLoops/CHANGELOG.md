@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.6
+
+- The bars Stash draws for markers with an end time (such as cuts) now sit below the seek bar instead of above it, so the loop line stays right above the seek bar. Several layers of bars are squeezed to fit above the buttons.
+- Click a marker bar to loop it: its start and end become the loop marks and it plays from the start straight away, in the loop mode that is on (loop forever if neither is). Clicking a bar no longer seeks to the point clicked.
+
 ## 0.1.5
 
 - The loop line no longer moves when the seek bar thickens and thins as it is hovered or focused; it is placed from the bar at rest.
