@@ -1,6 +1,6 @@
 name: Playback Loops
 description: Replaces the scene player's looping. Set two marks on a loop line above the seek bar to loop between them, play the loop once or forever, and save it as a {CUT} marker. Takes over Stash's own A/B loop and loop controls.
-version: 0.1.6
+version: 0.1.7
 url: https://github.com/frcooper/stash-plugins/tree/main/plugins/PlaybackLoops
 ui:
   javascript:

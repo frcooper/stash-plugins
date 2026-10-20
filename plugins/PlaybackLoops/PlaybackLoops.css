@@ -27,6 +27,14 @@
   z-index: 2;
 }
 
+/* controls that pop up from the button row (the volume slider, the speed and
+   other menus) go over the loop line and the seek bar, so neither takes the
+   pointer from them */
+.video-js .vjs-control-bar > .vjs-volume-panel,
+.video-js .vjs-control-bar > .vjs-menu-button {
+  z-index: 3;
+}
+
 .video-js .pbl-track.has-layout.is-ready {
   display: block;
 }
