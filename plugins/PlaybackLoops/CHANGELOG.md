@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.7
+
+- The volume slider and the menus that pop up from the button row now sit over the loop line and the seek bar. Before, the loop line was on top, so the volume handle stopped responding where it crossed the line.
+
 ## 0.1.6
 
 - The bars Stash draws for markers with an end time (such as cuts) now sit below the seek bar instead of above it, so the loop line stays right above the seek bar. Several layers of bars are squeezed to fit above the buttons.
